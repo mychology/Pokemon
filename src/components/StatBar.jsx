@@ -1,50 +1,17 @@
 // src/components/StatBar.jsx
-import React from 'react';
-import styled from 'styled-components';
+import React from "react";
 
-const BarWrap = styled.div`
-  background: #e9e9e9;
-  height: ${p => p.height || '12px'};
-  border-radius: 8px;
-  overflow: hidden;
-  border: 1px solid rgba(0,0,0,0.08);
-  display: flex;
-  align-items: center;
-  gap: 8px;
-`;
-
-const Fill = styled.div`
-  height: 100%;
-  border-radius: 6px;
-  background: linear-gradient(90deg, #d43b2b, #ff5a4a);
-  box-shadow: inset 0 -2px 4px rgba(0,0,0,0.12);
-  transition: width 450ms ease;
-`;
-
-const ValueLabel = styled.div`
-  font-size: 11px;
-  min-width: 30px;
-  text-align: right;
-  color: #222;
-`;
-
-export default function StatBar({
-  value = 0,
-  max = 255,
-  showValue = false,
-  height = '12px',
-}) {
-  const safeMax = typeof max === 'number' && max > 0 ? max : 1;
-  const safeValue = typeof value === 'number' && Number.isFinite(value) ? value : 0;
-  const pct = Math.max(0, Math.min(100, (safeValue / safeMax) * 100));
-  const widthStr = `${pct}%`;
-
+export default function StatBar({ label, value }) {
   return (
-    <BarWrap height={height} role="progressbar" aria-valuemin={0} aria-valuemax={safeMax} aria-valuenow={safeValue}>
-      <div style={{ flex: 1 }}>
-        <Fill style={{ width: widthStr }} />
+    <div className="flex items-center gap-2 text-xs">
+      <span className="w-20">{label}</span>
+      <div className="flex-1 bg-gray-300 rounded h-2">
+        <div
+          className="bg-red-500 h-2 rounded"
+          style={{ width: `${Math.min(value, 100)}%` }}
+        />
       </div>
-      {showValue && <ValueLabel>{safeValue}</ValueLabel>}
-    </BarWrap>
+      <span className="w-8 text-right">{value}</span>
+    </div>
   );
 }

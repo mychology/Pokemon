@@ -1,28 +1,92 @@
-/* src/index.css */
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
 
-body {
+:root {
+  --accent: #d43b2b;
+  --panel: #e6e6e6;
+  --panel-2: #d7d7d7;
+}
+
+/* panel triple-stroke helper used for panels not touching the concave circle */
+.panel-outline {
+  box-shadow:
+    inset 0 2px 0 rgba(255,255,255,0.6),
+    0 0 0 8px var(--accent);
+  background: linear-gradient(180deg, var(--panel), var(--panel-2));
+}
+
+/* card background pattern */
+.app-bg {
+  background-image:
+    radial-gradient(circle at 10% 15%, rgba(255,255,255,0.03), transparent 25%),
+    repeating-linear-gradient(120deg, rgba(0,0,0,0.02) 0 6px, transparent 6px 14px);
+}
+
+/* small helper for rounded panel interior */
+.panel-inner {
+  background: linear-gradient(180deg, #efefef, #e0e0e0);
+}
+
+/* load your gameboy font from src/assets */
+@font-face {
+  font-family: 'Gameboy';
+  src: url('/src/assets/gameboy.ttf') format('truetype');
+  font-weight: normal;
+  font-style: normal;
+  font-display: swap;
+}
+
+.gameboy-font {
+  font-family: 'Gameboy', 'Press Start 2P', monospace;
+}
+
+/* blinking LEDs: odd/even alternate */
+@keyframes blink-odd {
+  0% { opacity: 1; }
+  50% { opacity: 0.15; }
+  100% { opacity: 1; }
+}
+@keyframes blink-even {
+  0% { opacity: 0.15; }
+  50% { opacity: 1; }
+  100% { opacity: 0.15; }
+}
+.animate-blink-odd { animation: blink-odd 1s infinite ease-in-out; }
+.animate-blink-even { animation: blink-even 1s infinite ease-in-out; }
+
+/* speaker grille animation while playing */
+@keyframes grille-move {
+  0% { transform: translateY(0); opacity: 0.8; }
+  50% { transform: translateY(-1px); opacity: 1; }
+  100% { transform: translateY(0); opacity: 0.8; }
+}
+.speaker-playing > div { animation: grille-move 0.35s infinite ease-in-out; }
+
+/* keep sprites crisp when upscaling */
+img.pixelated { image-rendering: pixelated; }
+
+/* tooltip basic style (you can move to CSS module if preferred) */
+.tooltip {
+  pointer-events: none;
+  position: absolute;
+  transform: translateX(-50%);
+  background: rgba(0,0,0,0.9);
+  color: white;
+  font-size: 11px;
+  padding: 6px 8px;
+  border-radius: 4px;
+  white-space: nowrap;
+}
+
+html, body, #root {
+  background: url('/background.png') no-repeat center center fixed;
+  background-size: cover;
+  height: 100%;
   margin: 0;
   padding: 0;
-  font-family: "Poppins", sans-serif;
-  background: #F6F3EA;
-  color: #000;
+  overflow: hidden;
 }
 
-.container {
-  max-width: 1200px;
-  margin: 0 auto;
-  padding: 1rem;
-}
 
-.button {
-  background: #800000;
-  color: #fff;
-  border: none;
-  border-radius: 8px;
-  padding: 0.5rem 1rem;
-  cursor: pointer;
-}
 
-.button:hover {
-  background: #600000;
-}

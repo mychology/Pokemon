@@ -40,3 +40,11 @@
 .read-the-docs {
   color: #888;
 }
+
+@font-face {
+  font-family: 'GameBoy';
+  src: url('/src/assets/gameboy.ttf') format('truetype');
+  font-weight: normal;
+  font-style: normal;
+  font-display: swap;
+}
