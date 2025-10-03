@@ -63,7 +63,7 @@ function App() {
   }, []);
 
   return (
-    <div className="flex justify-center items-center h-screen bg-gray-300">
+    <div className="flex justify-center items-center h-screen">
       {pokemon ? <PokedexShell pokemon={pokemon} /> : <p>Loading...</p>}
     </div>
   );

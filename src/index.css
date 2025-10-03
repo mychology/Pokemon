@@ -8,21 +8,6 @@
   --panel-2: #d7d7d7;
 }
 
-/* panel triple-stroke helper used for panels not touching the concave circle */
-.panel-outline {
-  box-shadow:
-    inset 0 2px 0 rgba(255,255,255,0.6),
-    0 0 0 8px var(--accent);
-  background: linear-gradient(180deg, var(--panel), var(--panel-2));
-}
-
-/* card background pattern */
-.app-bg {
-  background-image:
-    radial-gradient(circle at 10% 15%, rgba(255,255,255,0.03), transparent 25%),
-    repeating-linear-gradient(120deg, rgba(0,0,0,0.02) 0 6px, transparent 6px 14px);
-}
-
 /* small helper for rounded panel interior */
 .panel-inner {
   background: linear-gradient(180deg, #efefef, #e0e0e0);
@@ -80,8 +65,8 @@ img.pixelated { image-rendering: pixelated; }
 }
 
 html, body, #root {
-  background: url('/background.png') no-repeat center center fixed;
-  background-size: cover;
+  background: url('/bruh.jpg') no-repeat center center fixed;
+  background-size:cover;
   height: 100%;
   margin: 0;
   padding: 0;

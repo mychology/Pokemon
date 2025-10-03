@@ -3,19 +3,14 @@ import { useEffect, useMemo, useState, useRef } from "react";
 
 /**
  * usePokemon(idOrName)
- * Returns:
- * {
- *  loading, error,
- *  pokemon, species,
- *  images: [{ key, label, url }], // image options (default, shiny, forms)
- *  currentImageIndex, setCurrentImageIndex, nextImage(), prevImage()
- *  types: [{name, url}],
- *  ability: { name, effect_entries[], short_effect } or null,
- *  stats: [{ name, value }],
- *  moves: [ { name, url } ],
- *  pagedMoves, movesPage, setMovesPage, totalMovesPages,
- *  evoChain: [ { name, id, sprite } ] up to full chain,
- * }
+ * - returns core pokemon + species + images + evoChain etc.
+ * - adds:
+ *   - forms: p.forms array (each { name, url }) so UI can iterate /pokemon-form endpoints
+ *   - clear: function to abort/clear hook state
+ *   - heldItemsDetails: [{ name, sprite, raw }]
+ *   - galleryImages, galleryIndex, nextGallery, prevGallery
+ *   - gen5Gif, gen5GifShiny (constructed URLs)
+ *   - cryUrl (if any audio URL found or discovered)
  */
 
 const API = "https://pokeapi.co/api/v2";
@@ -27,6 +22,7 @@ const simpleCache = {
   move: new Map(),
   evo: new Map(),
   form: new Map(),
+  item: new Map(),
 };
 
 function idFromUrl(url) {
@@ -35,24 +31,69 @@ function idFromUrl(url) {
   return parts[parts.length - 1];
 }
 
+/** Recursively collect sprite/audio urls (png/gif/jpg/mp3/wav/ogg) */
+function collectUrls(obj, out = new Set()) {
+  if (!obj || typeof obj !== "object") return out;
+  for (const k of Object.keys(obj)) {
+    const v = obj[k];
+    if (typeof v === "string") {
+      if (/\.(png|jpg|jpeg|gif|webp)$/i.test(v) || /\.(mp3|wav|ogg)$/i.test(v)) out.add(v);
+    } else if (typeof v === "object") {
+      collectUrls(v, out);
+    }
+  }
+  return out;
+}
+
 export default function usePokemon(idOrName) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [pokemon, setPokemon] = useState(null);
   const [species, setSpecies] = useState(null);
-  const [images, setImages] = useState([]); // {key,label,url}
+  const [images, setImages] = useState([]); // {key,label,url,sprite}
   const [currentImageIndex, setCurrentImageIndex] = useState(0);
   const [abilityInfo, setAbilityInfo] = useState(null);
   const [evoChain, setEvoChain] = useState([]);
-  const [movesPage, setMovesPage] = useState(0); // UI paging for moves
+  const [movesPage, setMovesPage] = useState(0);
+  const [heldItemsDetails, setHeldItemsDetails] = useState([]);
+  const [galleryIndex, setGalleryIndex] = useState(0);
+  const [galleryImages, setGalleryImages] = useState([]);
+  const [cryUrl, setCryUrl] = useState(null);
+
+  // NEW: forms array (from p.forms)
+  const [forms, setForms] = useState([]);
+
+  // to support clearing state externally
   const abortRef = useRef(null);
+  const clearedRef = useRef(false);
 
   useEffect(() => {
-    if (!idOrName) {
+    // reset cleared flag on id change
+    clearedRef.current = false;
+  }, [idOrName]);
+
+  useEffect(() => {
+    if (idOrName === undefined || idOrName === null || idOrName === "") {
+      // if given empty id, set to not loading and clear all data
       setLoading(false);
+      setError(null);
+      setPokemon(null);
+      setSpecies(null);
+      setImages([]);
+      setCurrentImageIndex(0);
+      setAbilityInfo(null);
+      setEvoChain([]);
+      setMovesPage(0);
+      setHeldItemsDetails([]);
+      setGalleryImages([]);
+      setGalleryIndex(0);
+      setForms([]);
+      setCryUrl(null);
       return;
     }
+
     let active = true;
+    // abort any previous
     abortRef.current?.abort?.();
     const controller = new AbortController();
     abortRef.current = controller;
@@ -61,97 +102,186 @@ export default function usePokemon(idOrName) {
 
     (async () => {
       try {
-        // 1) fetch pokemon
+        // 1) fetch pokemon (with caching)
         let p;
-        if (simpleCache.pokemon.has(idOrName)) {
-          p = simpleCache.pokemon.get(idOrName);
+        const requested = String(idOrName).toLowerCase();
+        if (simpleCache.pokemon.has(requested)) {
+          p = simpleCache.pokemon.get(requested);
         } else {
-          const r = await fetch(`${API}/pokemon/${idOrName}`, { signal: controller.signal });
-          if (!r.ok) throw new Error(`Failed to fetch pokemon ${idOrName}`);
+          const r = await fetch(`${API}/pokemon/${encodeURIComponent(requested)}`, { signal: controller.signal });
+          if (!r.ok) throw new Error(`Failed to fetch pokemon ${requested}`);
           p = await r.json();
           simpleCache.pokemon.set(p.name, p);
           simpleCache.pokemon.set(String(p.id), p);
         }
         if (!active) return;
-
         setPokemon(p);
 
-        // 2) fetch species
-        const spKey = p.species.name;
-        let sp;
-        if (simpleCache.species.has(spKey)) {
-          sp = simpleCache.species.get(spKey);
-        } else {
-          const r2 = await fetch(`${API}/pokemon-species/${spKey}`, { signal: controller.signal });
-          if (!r2.ok) throw new Error("Failed to fetch species");
-          sp = await r2.json();
-          simpleCache.species.set(sp.name, sp);
+        // set forms array (pokemon endpoint includes p.forms which are links to /pokemon-form/:id)
+        setForms(Array.isArray(p.forms) ? p.forms.slice() : []);
+
+        // attempt to discover any audio URL in the payload (some datasets may include)
+        (function findAudioUrl(obj) {
+          const urls = collectUrls(obj);
+          for (const u of urls) {
+            if (/\.(mp3|wav|ogg)$/i.test(u)) {
+              setCryUrl(u);
+              return;
+            }
+          }
+          setCryUrl(null);
+        })(p);
+
+        // 2) fetch species (cached)
+        const spKey = p.species?.name;
+        let sp = null;
+        if (spKey) {
+          if (simpleCache.species.has(spKey)) {
+            sp = simpleCache.species.get(spKey);
+          } else {
+            const r2 = await fetch(`${API}/pokemon-species/${encodeURIComponent(spKey)}`, { signal: controller.signal });
+            if (r2.ok) {
+              sp = await r2.json();
+              simpleCache.species.set(sp.name, sp);
+            }
+          }
         }
         if (!active) return;
         setSpecies(sp);
 
-        // 3) build image options: default + shiny, then try to prefetch forms as separate pokemon endpoints (if different)
+        // 3) build image options: default + shiny, then try to prefetch forms / varieties
         const imgs = [];
-        const officialArtworkDefault = p?.sprites?.other?.["official-artwork"]?.front_default;
-        const officialArtworkShiny = p?.sprites?.other?.["official-artwork"]?.front_shiny;
-        imgs.push({
-          key: "default",
-          label: "default",
-          url: officialArtworkDefault || p?.sprites?.front_default || null,
-        });
-        imgs.push({
-          key: "shiny",
-          label: "shiny",
-          url: officialArtworkShiny || p?.sprites?.front_shiny || null,
-        });
+        function pushImage(key, label, artworkUrl, spriteUrl) {
+          const displayUrl = artworkUrl || spriteUrl || null;
+          if (!displayUrl) return;
+          imgs.push({
+            key,
+            label,
+            url: displayUrl,
+            sprite: spriteUrl || displayUrl,
+          });
+        }
 
+        const baseArtwork = p?.sprites?.other?.["official-artwork"]?.front_default || p?.sprites?.front_default || null;
+        const baseSprite = p?.sprites?.front_default || null;
+        const baseShinyArtwork = p?.sprites?.other?.["official-artwork"]?.front_shiny || p?.sprites?.front_shiny || null;
+        const baseShinySprite = p?.sprites?.front_shiny || null;
+
+        // base (non-shiny) first
+        pushImage("default", p.name, baseArtwork, baseSprite);
+        // shiny counterpart
+        pushImage("shiny", `${p.name} (shiny)`, baseShinyArtwork, baseShinySprite);
+
+        // forms (distinct pokemon-form endpoints are referenced in p.forms). For each form, try to get images:
         const formNames = (p?.forms || []).map((f) => f.name).filter(Boolean);
         for (const name of formNames) {
           if (name === p.name) continue;
-          if (simpleCache.form.has(name)) {
-            const fp = simpleCache.form.get(name);
-            imgs.push({
-              key: `form:${name}`,
-              label: name,
-              url:
-                fp?.sprites?.other?.["official-artwork"]?.front_default ||
-                fp?.sprites?.front_default ||
-                null,
-            });
-          } else {
-            try {
-              const r = await fetch(`${API}/pokemon/${name}`, { signal: controller.signal });
+          try {
+            let fp;
+            if (simpleCache.form.has(name)) {
+              fp = simpleCache.form.get(name);
+            } else {
+              // Fetch the pokemon representation for the form name: often form names can be used as pokemon/{name}
+              const r = await fetch(`${API}/pokemon/${encodeURIComponent(name)}`, { signal: controller.signal });
               if (r.ok) {
-                const fp = await r.json();
+                fp = await r.json();
                 simpleCache.form.set(name, fp);
-                imgs.push({
-                  key: `form:${name}`,
-                  label: name,
-                  url:
-                    fp?.sprites?.other?.["official-artwork"]?.front_default ||
-                    fp?.sprites?.front_default ||
-                    null,
-                });
+              } else {
+                // If /pokemon/:name is not available, just skip gracefully
+                fp = null;
               }
-            } catch (err) {
-              void err;
             }
+            if (!fp) continue;
+            const art = fp?.sprites?.other?.["official-artwork"]?.front_default || fp?.sprites?.front_default || null;
+            const sprite = fp?.sprites?.front_default || null;
+            const artShiny = fp?.sprites?.other?.["official-artwork"]?.front_shiny || fp?.sprites?.front_shiny || null;
+            const spriteShiny = fp?.sprites?.front_shiny || null;
+            pushImage(`form:${fp.name}`, fp.name, art, sprite);
+            pushImage(`form-shiny:${fp.name}`, `${fp.name} (shiny)`, artShiny, spriteShiny);
+          } catch (err) {
+            // swallow but continue
+            void err;
           }
         }
 
+        // varieties from species (alolan/galarian/hisuian etc.)
+        const varietyNames = (sp?.varieties || []).map((v) => v.pokemon?.name).filter(Boolean);
+        for (const vname of varietyNames) {
+          if (vname === p.name) continue;
+          try {
+            let vp;
+            if (simpleCache.pokemon.has(vname)) {
+              vp = simpleCache.pokemon.get(vname);
+            } else {
+              const r = await fetch(`${API}/pokemon/${encodeURIComponent(vname)}`, { signal: controller.signal });
+              if (r.ok) {
+                vp = await r.json();
+                simpleCache.pokemon.set(vp.name, vp);
+              }
+            }
+            if (!vp) continue;
+            const art = vp?.sprites?.other?.["official-artwork"]?.front_default || vp?.sprites?.front_default || null;
+            const sprite = vp?.sprites?.front_default || null;
+            const artShiny = vp?.sprites?.other?.["official-artwork"]?.front_shiny || vp?.sprites?.front_shiny || null;
+            const spriteShiny = vp?.sprites?.front_shiny || null;
+            pushImage(`variety:${vp.name}`, vp.name, art, sprite);
+            pushImage(`variety-shiny:${vp.name}`, `${vp.name} (shiny)`, artShiny, spriteShiny);
+          } catch (err) {
+            void err;
+          }
+        }
+
+        // dedupe images by url (preserve order)
         const uniqueImgs = [];
         const seen = new Set();
         for (const it of imgs) {
-          if (!it.url) continue;
+          if (!it || !it.url) continue;
           if (seen.has(it.url)) continue;
           seen.add(it.url);
           uniqueImgs.push(it);
         }
 
-        setImages(uniqueImgs);
-        setCurrentImageIndex(0);
+        // build a quick local mapping label->index (lowercased)
+        const localIndexByName = {};
+        uniqueImgs.forEach((it, idx) => {
+          if (!it || !it.label) return;
+          const lbl = String(it.label).toLowerCase();
+          localIndexByName[lbl] = idx;
+          const cleaned = lbl.replace(/\s*\(shiny\)\s*$/, "").trim();
+          if (cleaned) localIndexByName[cleaned] = idx;
+        });
 
-        // 4) get primary ability details (first non-hidden ability)
+        // pick a sensible start index preferring non-shiny base variants
+        const baseKey = (p.name || "").toLowerCase();
+        let startIndex = -1;
+        // 1) exact non-shiny label equal to pokemon.name
+        startIndex = uniqueImgs.findIndex((it) => String(it.label || "").toLowerCase() === baseKey);
+        // 2) match after stripping "(shiny)"
+        if (startIndex === -1) {
+          startIndex = uniqueImgs.findIndex((it) => {
+            const lbl = String(it.label || "").toLowerCase();
+            return lbl.replace(/\s*\(shiny\)\s*$/, "").trim() === baseKey;
+          });
+        }
+        // 3) first non-shiny entry
+        if (startIndex === -1) {
+          startIndex = uniqueImgs.findIndex((it) => {
+            const lbl = String(it.label || "").toLowerCase();
+            return !lbl.includes("(shiny)");
+          });
+        }
+        // 4) fallback to first available
+        if (startIndex === -1) startIndex = 0;
+
+        setImages(uniqueImgs);
+        setCurrentImageIndex(startIndex);
+
+        // gallery images are the artwork/url list (used by up/down gallery navigation)
+        const gallery = uniqueImgs.map((i) => i.url).filter(Boolean);
+        setGalleryImages(gallery);
+        setGalleryIndex(0);
+
+        // 4) primary ability details
         const abilityEntry = (p.abilities || []).find((a) => a && a.is_hidden === false) || p.abilities?.[0];
         if (abilityEntry && abilityEntry.ability) {
           const abName = abilityEntry.ability.name;
@@ -159,7 +289,7 @@ export default function usePokemon(idOrName) {
             setAbilityInfo(simpleCache.ability.get(abName));
           } else {
             try {
-              const r = await fetch(`${API}/ability/${abName}`, { signal: controller.signal });
+              const r = await fetch(`${API}/ability/${encodeURIComponent(abName)}`, { signal: controller.signal });
               if (r.ok) {
                 const ab = await r.json();
                 const englishEffect = (ab.effect_entries || []).find((e) => e.language.name === "en");
@@ -175,7 +305,40 @@ export default function usePokemon(idOrName) {
           setAbilityInfo(null);
         }
 
-        // 5) evolution chain (via species.evolution_chain.url)
+        // 5) held items: fetch item sprites if any
+        async function fetchHeldItemsDetails() {
+          const held = p.held_items || [];
+          if (!held || !held.length) {
+            setHeldItemsDetails([]);
+            return;
+          }
+          const res = await Promise.all(
+            held.map(async (hi) => {
+              const itemName = hi?.item?.name;
+              if (!itemName) return null;
+              try {
+                if (simpleCache.item.has(itemName)) {
+                  const it = simpleCache.item.get(itemName);
+                  const spriteUrl = it?.sprites?.default ?? it?.sprites?.['default'] ?? null;
+                  return { name: itemName, sprite: spriteUrl, raw: it };
+                }
+                const r = await fetch(`${API}/item/${encodeURIComponent(itemName)}`, { signal: controller.signal });
+                if (!r.ok) throw new Error('no');
+                const it = await r.json();
+                simpleCache.item.set(itemName, it);
+                const spriteUrl = it?.sprites?.default ?? it?.sprites?.['default'] ?? null;
+                return { name: itemName, sprite: spriteUrl, raw: it };
+              } catch (err) {
+                void err;
+                return { name: itemName, sprite: null, raw: null };
+              }
+            })
+          );
+          setHeldItemsDetails(res.filter(Boolean));
+        }
+        await fetchHeldItemsDetails();
+
+        // 6) evolution chain
         const evoUrl = sp?.evolution_chain?.url;
         if (evoUrl) {
           const evoId = idFromUrl(evoUrl);
@@ -199,7 +362,7 @@ export default function usePokemon(idOrName) {
                 const chainWithSprites = await Promise.all(
                   chain.slice(0, 6).map(async (sname) => {
                     try {
-                      const r2 = await fetch(`${API}/pokemon/${sname}`, { signal: controller.signal });
+                      const r2 = await fetch(`${API}/pokemon/${encodeURIComponent(sname)}`, { signal: controller.signal });
                       if (!r2.ok) throw new Error("no");
                       const p2 = await r2.json();
                       return {
@@ -246,6 +409,16 @@ export default function usePokemon(idOrName) {
   const stats = useMemo(() => (pokemon?.stats || []).map((s) => ({ name: s.stat.name, value: s.base_stat })) || [], [pokemon]);
   const moves = useMemo(() => (pokemon?.moves || []).map((m) => m.move) || [], [pokemon]);
 
+  // gallery navigation (artwork images)
+  const nextGallery = () => {
+    if (!galleryImages || galleryImages.length <= 1) return;
+    setGalleryIndex((i) => (i + 1) % galleryImages.length);
+  };
+  const prevGallery = () => {
+    if (!galleryImages || galleryImages.length <= 1) return;
+    setGalleryIndex((i) => ((i - 1 + galleryImages.length) % galleryImages.length));
+  };
+
   const setImageIndexSafe = (idx) => {
     if (!images || images.length === 0) {
       setCurrentImageIndex(0);
@@ -264,13 +437,80 @@ export default function usePokemon(idOrName) {
 
   // simple moves paging (2 per page)
   const movesPerPage = 2;
-  const totalMovesPages = Math.ceil(moves.length / movesPerPage);
+  const totalMovesPages = Math.max(1, Math.ceil(moves.length / movesPerPage));
 
   const pagedMoves = useMemo(() => {
     const start = movesPage * movesPerPage;
     return moves.slice(start, start + movesPerPage);
   }, [moves, movesPage]);
 
+  // imageIndexByName (lowercased map)
+  const imageIndexByName = useMemo(() => {
+    const map = {};
+    images.forEach((it, idx) => {
+      if (!it) return;
+      const label = String(it.label || "").toLowerCase();
+      if (label) map[label] = idx;
+      const cleaned = label.replace(/\s*\(shiny\)\s*$/, "").trim();
+      if (cleaned) map[cleaned] = idx;
+    });
+    return map;
+  }, [images]);
+
+  // identify megaVariants and otherForms (non-shiny, non-base)
+  const { megaVariants, otherForms } = useMemo(() => {
+    const lowerImgs = images.map((i) => (i?.label || "").toLowerCase());
+    const m = [];
+    const o = [];
+    const base = (pokemon?.name || "").toLowerCase();
+    for (const lbl of lowerImgs) {
+      if (!lbl) continue;
+      if (lbl.includes("(shiny)")) continue;
+      if (lbl.includes("mega")) {
+        m.push(lbl);
+      } else if (lbl !== base) {
+        o.push(lbl);
+      }
+    }
+    return { megaVariants: Array.from(new Set(m)), otherForms: Array.from(new Set(o)) };
+  }, [images, pokemon]);
+
+  // Gen5 BW animated front gif URLs (constructed)
+  const gen5Gif = useMemo(() => {
+    if (!pokemon?.id) return null;
+    return `https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/other/showdown/${pokemon.id}.gif`;
+  }, [pokemon?.id]);
+  const gen5GifShiny = useMemo(() => {
+    if (!pokemon?.id) return null;
+    return `https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/other/showdown/shiny/${pokemon.id}.gif`;
+  }, [pokemon?.id]);
+
+  // Reset/clear function to be called from component (so RESET button works)
+  function clear() {
+    // abort any in-flight requests
+    try {
+      abortRef.current?.abort?.();
+    } catch (e) {
+      void e;
+    }
+    clearedRef.current = true;
+    setLoading(false);
+    setError(null);
+    setPokemon(null);
+    setSpecies(null);
+    setImages([]);
+    setCurrentImageIndex(0);
+    setAbilityInfo(null);
+    setEvoChain([]);
+    setMovesPage(0);
+    setHeldItemsDetails([]);
+    setGalleryImages([]);
+    setGalleryIndex(0);
+    setForms([]);
+    setCryUrl(null);
+  }
+
+  // convenience exposures
   return {
     loading,
     error,
@@ -290,5 +530,20 @@ export default function usePokemon(idOrName) {
     setMovesPage,
     totalMovesPages,
     evoChain,
+    megaVariants,
+    otherForms,
+    imageIndexByName,
+    // new / useful additions
+    heldItemsDetails,
+    galleryImages,
+    galleryIndex,
+    nextGallery,
+    prevGallery,
+    gen5Gif,
+    gen5GifShiny,
+    cryUrl,
+    // added
+    forms,
+    clear,
   };
 }
