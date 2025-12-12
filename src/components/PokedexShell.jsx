@@ -3,6 +3,19 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import usePokemon from "../hooks/usePokemon";
 import SizeComparison from "./SizeComparison";
 import HeldItems from "./HeldItems";
+import {
+  createHeldItemOverride,
+  deleteHeldItemOverride,
+  deleteOverrideEntry,
+  fetchOverrideRecord,
+  hasOverrideApi,
+  overrideApiBase,
+  saveOverrideEntry,
+  uploadOverrideFile,
+} from "../lib/overrideApi";
+
+const TYPE_FILTER_CACHE = new Map();
+const ADMIN_TOKEN_KEY = "pokedex-admin-token";
 
 /**
  * PokedexShell component
@@ -43,6 +56,10 @@ export default function PokedexShell({ initial = 1 }) {
     forms: formsList = [],
     clear: clearPokemonState,
     cryUrl,
+    displayName,
+    flavorText,
+    override: overrideInfo,
+    refresh: refreshPokemonData,
   } = usePokemon(currentId);
 
   // chevron tweak
@@ -95,6 +112,424 @@ export default function PokedexShell({ initial = 1 }) {
   const SPRITE_SCALE = 0.9;
   const spriteSide = ORB_R * 1.8 * SPRITE_SCALE;
 
+  const [editMode, setEditMode] = useState(false);
+  const [adminToken, setAdminToken] = useState("");
+  const [overrideDraft, setOverrideDraft] = useState({
+    slug: "",
+    pokemonId: null,
+    displayName: "",
+    description: "",
+    spriteNormal: null,
+    spriteShiny: null,
+    artNormal: null,
+    artShiny: null,
+    metadataJson: null,
+  });
+  const [draftDirty, setDraftDirty] = useState(false);
+  const [operationStatus, setOperationStatus] = useState(null);
+  const [overrideBusy, setOverrideBusy] = useState(false);
+  const [pendingUpload, setPendingUpload] = useState(null);
+  const fileInputRef = useRef(null);
+  const [newHeldItem, setNewHeldItem] = useState({ name: "", sprite: "", notes: "" });
+  const [heldItemBusy, setHeldItemBusy] = useState(false);
+  const [showOverridePanel, setShowOverridePanel] = useState(false);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const stored = window.localStorage.getItem(ADMIN_TOKEN_KEY);
+    if (stored) setAdminToken(stored);
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    if (adminToken) {
+      window.localStorage.setItem(ADMIN_TOKEN_KEY, adminToken);
+    } else {
+      window.localStorage.removeItem(ADMIN_TOKEN_KEY);
+    }
+  }, [adminToken]);
+
+  useEffect(() => {
+    setOverrideDraft({
+      slug: (overrideInfo?.slug ?? pokemon?.name?.toLowerCase() ?? "").trim(),
+      pokemonId: overrideInfo?.pokemonId ?? pokemon?.id ?? null,
+      displayName: overrideInfo?.displayName ?? "",
+      description: overrideInfo?.description ?? "",
+      spriteNormal: overrideInfo?.spriteNormal ?? null,
+      spriteShiny: overrideInfo?.spriteShiny ?? null,
+      artNormal: overrideInfo?.artNormal ?? null,
+      artShiny: overrideInfo?.artShiny ?? null,
+      metadataJson: overrideInfo?.metadataJson ?? null,
+    });
+    setDraftDirty(false);
+  }, [
+    pokemon?.id,
+    pokemon?.name,
+    overrideInfo?.id,
+    overrideInfo?.updatedAt,
+    overrideInfo?.spriteNormal,
+    overrideInfo?.spriteShiny,
+    overrideInfo?.artNormal,
+    overrideInfo?.artShiny,
+    overrideInfo?.displayName,
+    overrideInfo?.description,
+    overrideInfo?.metadataJson,
+    overrideInfo?.pokemonId,
+    overrideInfo?.slug,
+  ]);
+
+  useEffect(() => {
+    if (!operationStatus) return;
+    const timer = setTimeout(() => setOperationStatus(null), 5000);
+    return () => clearTimeout(timer);
+  }, [operationStatus]);
+
+  const canEdit = editMode && hasOverrideApi;
+  const identifierForOverride = pokemon?.id ?? overrideDraft?.slug ?? overrideInfo?.slug ?? currentId ?? "";
+  const overrideHeldItems = overrideInfo?.heldItems ?? [];
+
+  function setStatusMessage(type, message) {
+    if (!message) return;
+    setOperationStatus({ type, message, at: Date.now() });
+  }
+
+  function ensureAdminAccess() {
+    if (!hasOverrideApi) {
+      setStatusMessage("error", "Set VITE_OVERRIDE_API_URL to enable overrides.");
+      return null;
+    }
+    if (adminToken) return adminToken;
+    if (typeof window === "undefined") return null;
+    const token = window.prompt("Enter admin token");
+    if (!token) {
+      setStatusMessage("error", "Admin token is required to edit overrides.");
+      return null;
+    }
+    setAdminToken(token.trim());
+    return token.trim();
+  }
+
+  function buildOverridePayload(patch = {}) {
+    const displayProvided = Object.prototype.hasOwnProperty.call(patch, "displayName");
+    const descriptionProvided = Object.prototype.hasOwnProperty.call(patch, "description");
+    const normalizedDisplay = displayProvided
+      ? normalizeOptionalText(patch.displayName)
+      : normalizeOptionalText(overrideDraft?.displayName ?? overrideInfo?.displayName ?? null);
+    const normalizedDescription = descriptionProvided
+      ? normalizeOptionalText(patch.description)
+      : normalizeOptionalText(overrideDraft?.description ?? overrideInfo?.description ?? null);
+
+    const slugCandidates = [
+      patch.slug ? sanitizeSearchValue(patch.slug) : null,
+      normalizedDisplay && displayProvided ? sanitizeSearchValue(patch.displayName ?? normalizedDisplay) : null,
+      !displayProvided && overrideDraft?.displayName ? sanitizeSearchValue(overrideDraft.displayName) : null,
+      overrideDraft?.slug ? sanitizeSearchValue(overrideDraft.slug) : null,
+      overrideInfo?.slug ? sanitizeSearchValue(overrideInfo.slug) : null,
+      pokemon?.name ? sanitizeSearchValue(pokemon.name) : null,
+      typeof pokemon?.id === "number" ? sanitizeSearchValue(pokemon.id) : null,
+      currentId ? sanitizeSearchValue(currentId) : null,
+    ].filter((val) => val && String(val).trim().length > 0);
+    const normalizedSlug = slugCandidates.length ? String(slugCandidates[0]).trim().toLowerCase() : "";
+
+    const pokemonIdValue = (() => {
+      const direct =
+        patch.pokemonId ??
+        overrideDraft?.pokemonId ??
+        overrideInfo?.pokemonId ??
+        pokemon?.id ??
+        (Number.isFinite(Number(currentId)) ? Number(currentId) : null);
+      return direct ?? null;
+    })();
+
+    return {
+      slug: normalizedSlug,
+      pokemonId: pokemonIdValue,
+      displayName: normalizedDisplay,
+      description: normalizedDescription,
+      spriteNormal:
+        patch.spriteNormal !== undefined ? patch.spriteNormal : overrideDraft?.spriteNormal ?? null,
+      spriteShiny:
+        patch.spriteShiny !== undefined ? patch.spriteShiny : overrideDraft?.spriteShiny ?? null,
+      artNormal: patch.artNormal !== undefined ? patch.artNormal : overrideDraft?.artNormal ?? null,
+      artShiny: patch.artShiny !== undefined ? patch.artShiny : overrideDraft?.artShiny ?? null,
+      metadataJson:
+        patch.metadataJson !== undefined ? patch.metadataJson : overrideDraft?.metadataJson ?? null,
+    };
+  }
+
+  async function persistOverridePatch(patch, successMessage, providedToken) {
+    if (!hasOverrideApi) {
+      setStatusMessage("error", "Override API is not configured.");
+      return null;
+    }
+    if (!identifierForOverride) {
+      setStatusMessage("error", "Pokemon is not loaded yet.");
+      return null;
+    }
+    const token = providedToken || ensureAdminAccess();
+    if (!token) return null;
+
+    const payload = buildOverridePayload(patch);
+    if (!payload.pokemonId && !payload.slug) {
+      setStatusMessage("error", "Missing pokemon identifier for override.");
+      return null;
+    }
+    setOverrideBusy(true);
+    try {
+      const res = await saveOverrideEntry(identifierForOverride, payload, token);
+      const saved = res?.override ?? payload;
+      setOverrideDraft({
+        slug: saved.slug ?? payload.slug ?? "",
+        pokemonId: saved.pokemonId ?? payload.pokemonId ?? null,
+        displayName: saved.displayName ?? "",
+        description: saved.description ?? "",
+        spriteNormal: saved.spriteNormal ?? null,
+        spriteShiny: saved.spriteShiny ?? null,
+        artNormal: saved.artNormal ?? null,
+        artShiny: saved.artShiny ?? null,
+        metadataJson: saved.metadataJson ?? null,
+      });
+      setDraftDirty(false);
+      if (successMessage) {
+        setStatusMessage("success", successMessage);
+      } else {
+        setStatusMessage("success", "Override saved.");
+      }
+      refreshPokemonData && refreshPokemonData();
+      return saved;
+    } catch (err) {
+      setStatusMessage("error", err?.message || "Failed to save override.");
+      throw err;
+    } finally {
+      setOverrideBusy(false);
+    }
+  }
+
+  function beginUpload(target) {
+    const token = ensureAdminAccess();
+    if (!token) return;
+    setPendingUpload({ target, token });
+    if (fileInputRef.current) {
+      fileInputRef.current.value = "";
+      fileInputRef.current.click();
+    }
+  }
+
+  function resolveUploadUrl(url) {
+    if (!url) return null;
+    if (/^https?:\/\//i.test(url)) return url;
+    if (!overrideApiBase) return url;
+    if (url.startsWith("/")) return `${overrideApiBase}${url}`;
+    return `${overrideApiBase}/${url}`;
+  }
+
+  async function handleFileSelection(event) {
+    const file = event.target?.files?.[0];
+    if (!file || !pendingUpload) return;
+    try {
+      const response = await uploadOverrideFile(file, pendingUpload.token);
+      const normalizedUrl = resolveUploadUrl(response?.url);
+      if (!normalizedUrl) throw new Error("Upload did not return a file URL.");
+      if (pendingUpload.target === "newHeldItemSprite") {
+        setNewHeldItem((prev) => ({ ...prev, sprite: normalizedUrl }));
+        setStatusMessage("success", "Held item image uploaded. Save to attach.");
+      } else {
+        const label = pendingUpload.target.includes("sprite") ? "Sprite updated." : "Artwork updated.";
+        await persistOverridePatch({ [pendingUpload.target]: normalizedUrl }, label, pendingUpload.token);
+      }
+    } catch (err) {
+      setStatusMessage("error", err?.message || "File upload failed.");
+    } finally {
+      if (event.target) event.target.value = "";
+      setPendingUpload(null);
+    }
+  }
+
+  function handleDraftChange(field, value) {
+    setOverrideDraft((prev) => ({ ...prev, [field]: value }));
+    setDraftDirty(true);
+  }
+
+  async function handleSaveTextFields() {
+    const res = await persistOverridePatch(
+      {
+        displayName: overrideDraft?.displayName ?? "",
+        description: overrideDraft?.description ?? "",
+      },
+      "Name and description saved."
+    );
+    if (res) {
+      setDraftDirty(false);
+      refreshPokemonData && refreshPokemonData();
+    }
+  }
+
+  async function handleResetText() {
+    const token = ensureAdminAccess();
+    if (!token) return;
+    const canonicalSlugSource =
+      pokemon?.name ??
+      (typeof pokemon?.id === "number" ? String(pokemon.id) : null) ??
+      (overrideInfo?.slug || overrideInfo?.pokemonId) ??
+      currentId ??
+      "";
+    const canonicalSlug = sanitizeSearchValue(canonicalSlugSource) || undefined;
+    try {
+      const res = await persistOverridePatch(
+        { displayName: null, description: null, slug: canonicalSlug },
+        "Text reset to API default.",
+        token
+      );
+      if (res) {
+        setDraftDirty(false);
+        refreshPokemonData && refreshPokemonData();
+        setOverrideDraft((prev) => ({
+          ...prev,
+          displayName: "",
+          description: "",
+        }));
+      }
+    } catch (err) {
+      if (String(err?.message || "").includes("404")) {
+        setOverrideDraft({
+          slug: pokemon?.name?.toLowerCase() ?? "",
+          pokemonId: pokemon?.id ?? null,
+          displayName: "",
+          description: "",
+          spriteNormal: overrideDraft?.spriteNormal ?? null,
+          spriteShiny: overrideDraft?.spriteShiny ?? null,
+          artNormal: overrideDraft?.artNormal ?? null,
+          artShiny: overrideDraft?.artShiny ?? null,
+          metadataJson: overrideDraft?.metadataJson ?? null,
+        });
+        setDraftDirty(false);
+        refreshPokemonData && refreshPokemonData();
+        setStatusMessage("success", "Text reset to API default.");
+      } else {
+        setStatusMessage("error", err?.message || "Failed to reset text.");
+      }
+    }
+  }
+
+  async function handleOverrideReset() {
+    if (!canEdit || !identifierForOverride) return;
+    if (typeof window !== "undefined" && !window.confirm("Remove all overrides for this Pokemon?")) return;
+    const token = ensureAdminAccess();
+    if (!token) return;
+    setOverrideBusy(true);
+    try {
+      await deleteOverrideEntry(identifierForOverride, token);
+      setOverrideDraft({
+        slug: pokemon?.name?.toLowerCase() ?? "",
+        pokemonId: pokemon?.id ?? null,
+        displayName: "",
+        description: "",
+        spriteNormal: null,
+        spriteShiny: null,
+        artNormal: null,
+        artShiny: null,
+        metadataJson: null,
+      });
+      setStatusMessage("success", "Override removed. Using PokeAPI defaults.");
+      refreshPokemonData && refreshPokemonData();
+      setDraftDirty(false);
+    } catch (err) {
+      if (String(err?.message || "").includes("404")) {
+        setStatusMessage("success", "Override already cleared.");
+        refreshPokemonData && refreshPokemonData();
+        setDraftDirty(false);
+      } else {
+        setStatusMessage("error", err?.message || "Failed to delete override.");
+      }
+    } finally {
+      setOverrideBusy(false);
+    }
+  }
+
+  async function handleAddHeldItem() {
+    if (!canEdit || !identifierForOverride) return;
+    const trimmedName = (newHeldItem.name || "").trim();
+    if (!trimmedName) {
+      setStatusMessage("error", "Held item name is required.");
+      return;
+    }
+    const token = ensureAdminAccess();
+    if (!token) return;
+    setHeldItemBusy(true);
+    try {
+      await createHeldItemOverride(identifierForOverride, {
+        itemName: trimmedName,
+        itemSprite: newHeldItem.sprite?.trim() || null,
+        notes: newHeldItem.notes?.trim() || null,
+      }, token);
+      setNewHeldItem({ name: "", sprite: "", notes: "" });
+      setStatusMessage("success", "Held item override saved.");
+      refreshPokemonData && refreshPokemonData();
+    } catch (err) {
+      setStatusMessage("error", err?.message || "Failed to save held item.");
+    } finally {
+      setHeldItemBusy(false);
+    }
+  }
+
+  async function handleDeleteHeldItem(itemId) {
+    if (!canEdit || !itemId) return;
+    if (typeof window !== "undefined" && !window.confirm("Delete this held item override?")) return;
+    const token = ensureAdminAccess();
+    if (!token) return;
+    setHeldItemBusy(true);
+    try {
+      await deleteHeldItemOverride(identifierForOverride, itemId, token);
+      setStatusMessage("success", "Held item removed.");
+      refreshPokemonData && refreshPokemonData();
+    } catch (err) {
+      setStatusMessage("error", err?.message || "Failed to delete held item.");
+    } finally {
+      setHeldItemBusy(false);
+    }
+  }
+
+  function toggleEditMode() {
+    if (!hasOverrideApi) {
+      setStatusMessage("error", "Configure the override server URL first.");
+      return;
+    }
+    if (!editMode) {
+      const token = ensureAdminAccess();
+      if (!token) return;
+    }
+    setEditMode((prev) => !prev);
+  }
+
+  function promptForAdminToken() {
+    if (typeof window === "undefined") return;
+    const next = window.prompt("Enter admin token", adminToken || "");
+    if (next === null) return;
+    setAdminToken(next.trim());
+  }
+
+  function clearAdminToken() {
+    setAdminToken("");
+    setEditMode(false);
+  }
+
+  const handleOrbOverrideClick = (event) => {
+    if (!canEdit) return;
+    event.stopPropagation();
+    beginUpload(event.shiftKey ? "spriteShiny" : "spriteNormal");
+  };
+
+  const handleArtOverrideClick = (event) => {
+    if (!canEdit) return;
+    event.stopPropagation();
+    beginUpload(event.shiftKey ? "artShiny" : "artNormal");
+  };
+
+  const handleHeldItemUploadClick = () => {
+    if (!canEdit) return;
+    beginUpload("newHeldItemSprite");
+  };
+
   // convenience values
   const pokeNumber = pokemon?.id ?? currentId;
 
@@ -118,12 +553,21 @@ export default function PokedexShell({ initial = 1 }) {
 
   // previous small-sprite behavior preserved as fallback
   const smallSpriteUrl = useMemo(() => {
-    if (!images || images.length === 0) return pokemon?.sprites?.front_default || assetMap["placeholder-64"] || "";
+    if (!images || images.length === 0) return pokemon?.sprites?.front_default || assetMap["placeholder-64"] || null;
     const entry = images[currentImageIndex] || {};
-    return entry.sprite || entry.url || pokemon?.sprites?.front_default || assetMap["placeholder-64"] || "";
+    return entry.sprite || entry.url || pokemon?.sprites?.front_default || assetMap["placeholder-64"] || null;
   }, [images, currentImageIndex, pokemon, assetMap]);
 
-  // Orb (lens) sprite — we still detect available Gen5 BW gif or showdown fallback
+  const canonicalName = useMemo(() => {
+    return images?.[currentImageIndex]?.label ?? pokemon?._formInfo?.name ?? pokemon?.name ?? "";
+  }, [images, currentImageIndex, pokemon?._formInfo?.name, pokemon?.name]);
+
+  const resolvedDisplayName = useMemo(() => {
+    const trimmed = (displayName || "").trim();
+    return trimmed || canonicalName || "";
+  }, [displayName, canonicalName]);
+
+  // Orb (lens) sprite - we still detect available Gen5 BW gif or showdown fallback
   const [orbUrlPrimary, setOrbUrlPrimary] = useState(null);
   const [orbUrlShiny, setOrbUrlShiny] = useState(null);
 
@@ -132,9 +576,16 @@ export default function PokedexShell({ initial = 1 }) {
     async function findOrbUrls() {
       setOrbUrlPrimary(null);
       setOrbUrlShiny(null);
-      if (!pokemon?.id) return;
+      if (overrideInfo?.spriteNormal) {
+        setOrbUrlPrimary(overrideInfo.spriteNormal);
+      }
+      if (overrideInfo?.spriteShiny) {
+        setOrbUrlShiny(overrideInfo.spriteShiny);
+      }
+      const primaryId = pokemon?._formInfo?.id ?? pokemon?.id;
+      if (!primaryId) return;
 
-      const id = String(pokemon.id);
+      const id = String(primaryId);
       const candidates = [
         `https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/other/showdown/${id}.gif`,
       ];
@@ -152,27 +603,35 @@ export default function PokedexShell({ initial = 1 }) {
         }
       }
 
-      for (const u of candidates) {
-        const ok = await testUrl(u);
-        if (!mounted) return;
-        if (ok) {
-          setOrbUrlPrimary(u);
-          break;
+      let primarySet = Boolean(overrideInfo?.spriteNormal);
+      if (!primarySet) {
+        for (const u of candidates) {
+          const ok = await testUrl(u);
+          if (!mounted) return;
+          if (ok) {
+            setOrbUrlPrimary(u);
+            primarySet = true;
+            break;
+          }
         }
       }
-      for (const u of candidatesShiny) {
-        const ok = await testUrl(u);
-        if (!mounted) return;
-        if (ok) {
-          setOrbUrlShiny(u);
-          break;
+      let shinySet = Boolean(overrideInfo?.spriteShiny);
+      if (!shinySet) {
+        for (const u of candidatesShiny) {
+          const ok = await testUrl(u);
+          if (!mounted) return;
+          if (ok) {
+            setOrbUrlShiny(u);
+            shinySet = true;
+            break;
+          }
         }
       }
 
-      if (!orbUrlPrimary && smallSpriteUrl) {
+      if (mounted && !primarySet && smallSpriteUrl) {
         setOrbUrlPrimary(smallSpriteUrl);
       }
-      if (!orbUrlShiny) {
+      if (mounted && !shinySet) {
         setOrbUrlShiny(null);
       }
     }
@@ -180,8 +639,7 @@ export default function PokedexShell({ initial = 1 }) {
     return () => {
       mounted = false;
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pokemon?.id, smallSpriteUrl]);
+  }, [pokemon?._formInfo?.id, pokemon?.id, smallSpriteUrl, overrideInfo?.spriteNormal, overrideInfo?.spriteShiny]);
 
   // UI: determine whether current displayed image is shiny / mega / other
   const currLabelRaw = (images?.[currentImageIndex]?.label ?? pokemon?.name ?? "").toString();
@@ -268,6 +726,7 @@ export default function PokedexShell({ initial = 1 }) {
   const [filteredList, setFilteredList] = useState(null); // array of pokemon names when a filter is active
   const [filterLoading, setFilterLoading] = useState(false);
   const [filterError, setFilterError] = useState(null);
+  const filterRequestIdRef = useRef(0);
 
   // derive available filter types from assets (expects filter-[type].svg naming)
   const availableFilterTypes = useMemo(() => {
@@ -279,17 +738,40 @@ export default function PokedexShell({ initial = 1 }) {
   // helper to fetch pokemons for a type from PokeAPI and set filteredList
   async function applyTypeFilter(typeName) {
     if (!typeName) return;
-    setFilterLoading(true);
+
+    const normalized = typeName.toLowerCase();
     setFilterError(null);
+
+    if (TYPE_FILTER_CACHE.has(normalized)) {
+      const requestId = filterRequestIdRef.current + 1;
+      filterRequestIdRef.current = requestId;
+      const names = TYPE_FILTER_CACHE.get(normalized) || [];
+      setFilteredList(names);
+      setActiveFilterType(normalized);
+      setShowFilterPopup(false);
+      const currName = (pokemon?.name || String(currentId)).toString().toLowerCase();
+      if (!names.includes(currName) && names.length) {
+        setCurrentId(names[0]);
+      }
+      setFilterLoading(false);
+      return;
+    }
+
+    const requestId = filterRequestIdRef.current + 1;
+    filterRequestIdRef.current = requestId;
+    setFilterLoading(true);
     try {
-      const r = await fetch(`https://pokeapi.co/api/v2/type/${typeName.toLowerCase()}`);
+      const r = await fetch(`https://pokeapi.co/api/v2/type/${normalized}`);
       if (!r.ok) throw new Error("Failed to fetch type list");
       const data = await r.json();
       const names = (data.pokemon || []).map((p) => p.pokemon.name).filter(Boolean);
+      TYPE_FILTER_CACHE.set(normalized, names);
+      if (filterRequestIdRef.current !== requestId) {
+        return;
+      }
       setFilteredList(names);
-      setActiveFilterType(typeName.toLowerCase());
+      setActiveFilterType(normalized);
       setShowFilterPopup(false);
-      // if current pokemon not in new filtered list, jump to first item
       const currName = (pokemon?.name || String(currentId)).toString().toLowerCase();
       if (!names.includes(currName) && names.length) {
         setCurrentId(names[0]);
@@ -298,14 +780,18 @@ export default function PokedexShell({ initial = 1 }) {
       console.error("Type filter error:", err);
       setFilterError("Failed to load filter list");
     } finally {
-      setFilterLoading(false);
+      if (filterRequestIdRef.current === requestId) {
+        setFilterLoading(false);
+      }
     }
   }
 
   function clearTypeFilter() {
+    filterRequestIdRef.current += 1;
     setActiveFilterType(null);
     setFilteredList(null);
     setFilterError(null);
+    setFilterLoading(false);
     setShowFilterPopup(false);
   }
 
@@ -458,7 +944,7 @@ export default function PokedexShell({ initial = 1 }) {
   const [editingName, setEditingName] = useState(false);
   const [nameInput, setNameInput] = useState("");
   useEffect(() => {
-    const label = images?.[currentImageIndex]?.label ?? pokemon?.name ?? "";
+    const label = images?.[currentImageIndex]?.label ?? pokemon?._formInfo?.name ?? pokemon?.name ?? "";
     setNameInput(label);
   }, [images, currentImageIndex, pokemon]);
 
@@ -469,15 +955,37 @@ export default function PokedexShell({ initial = 1 }) {
     if (/^\d+$/.test(t)) return t;
     return t.toLowerCase().replace(/\s+/g, "-");
   }
-  function submitNameSearch(val) {
+
+  function normalizeOptionalText(value) {
+    if (value === null || value === undefined) return null;
+    const trimmed = String(value).trim();
+    return trimmed.length ? trimmed : null;
+  }
+  async function submitNameSearch(val) {
     const v = sanitizeSearchValue(val);
     setEditingName(false);
     if (!v) return;
+    const overrideNameMatch =
+      overrideInfo?.displayName && sanitizeSearchValue(overrideInfo.displayName) === v && pokemon?.id;
+    if (overrideNameMatch) {
+      setCurrentId(pokemon.id);
+      return;
+    }
+    // Try override API lookup (slug/displayName) to resolve to a pokemon id
+    try {
+      const ov = await fetchOverrideRecord(v);
+      if (ov?.pokemonId) {
+        setCurrentId(ov.pokemonId);
+        return;
+      }
+    } catch (err) {
+      void err;
+    }
     setCurrentId(v);
   }
 
   function formatDisplayName(rawLabel) {
-    if (!rawLabel) return "—";
+    if (!rawLabel) return "???";
     const label = String(rawLabel);
     const cleaned = label.replace(/\s*\(shiny\)\s*$/i, "").trim();
     const tokens = cleaned.split(/[-_\s]+/).filter(Boolean);
@@ -521,6 +1029,18 @@ export default function PokedexShell({ initial = 1 }) {
     }
 
     return null;
+  }
+
+  function updateCurrentIdFromImage(idx, fallbackLabel) {
+    if (!images || images.length === 0) return;
+    if (idx == null || Number.isNaN(idx) || idx < 0 || idx >= images.length) return;
+    const candidateRaw = images[idx]?.sourceName || fallbackLabel;
+    if (!candidateRaw) return;
+    const normalized = sanitizeSearchValue(candidateRaw);
+    if (!normalized) return;
+    const currentNormalized = sanitizeSearchValue(currentId);
+    if (currentNormalized === normalized) return;
+    setCurrentId(normalized);
   }
 
   // --- Form / mega / shiny handlers ---
@@ -568,17 +1088,26 @@ export default function PokedexShell({ initial = 1 }) {
         const idx = findBestIndexFor(target);
         if (idx != null) {
           setCurrentImageIndex(idx);
+          updateCurrentIdFromImage(idx, target);
           return;
         }
       }
       const baseIdx = findBestIndexFor(baseKey);
-      setCurrentImageIndex(baseIdx != null ? baseIdx : 0);
+      const fallbackIdx = baseIdx != null ? baseIdx : 0;
+      setCurrentImageIndex(fallbackIdx);
+      updateCurrentIdFromImage(fallbackIdx, baseKey);
       return;
     }
 
     const firstMega = megas[0];
     const firstIdx = findBestIndexFor(firstMega);
-    if (firstIdx != null) setCurrentImageIndex(firstIdx);
+    if (firstIdx != null) {
+      setCurrentImageIndex(firstIdx);
+      updateCurrentIdFromImage(firstIdx, firstMega);
+    } else {
+      const normalized = sanitizeSearchValue(firstMega);
+      if (normalized) setCurrentId(normalized);
+    }
   }
 
   function cycleOtherFormsUI() {
@@ -593,7 +1122,13 @@ export default function PokedexShell({ initial = 1 }) {
     pos = (pos + 1) % forms.length;
     const target = forms[pos];
     const idx = findBestIndexFor(target);
-    if (idx != null) setCurrentImageIndex(idx);
+    if (idx != null) {
+      setCurrentImageIndex(idx);
+      updateCurrentIdFromImage(idx, target);
+    } else {
+      const normalized = sanitizeSearchValue(target);
+      if (normalized) setCurrentId(normalized);
+    }
   }
 
   // evolutions clickable
@@ -606,79 +1141,80 @@ export default function PokedexShell({ initial = 1 }) {
   // --- UP / DOWN D-PAD: iterate pokemon-form endpoints (skip shiny) ---
   const [formIndex, setFormIndex] = useState(0);
   useEffect(() => {
-    if (!formsList || !formsList.length || !images || !images.length) {
+    if (!formsList || !formsList.length) {
       setFormIndex(0);
       return;
     }
-    const curr = (images?.[currentImageIndex]?.label ?? pokemon?.name ?? "").toLowerCase().replace(/\s*\(shiny\)\s*$/, "").trim();
-    const idx = formsList.findIndex((f) => {
-      if (!f || !f.name) return false;
-      return f.name.toLowerCase() === curr || f.name.toLowerCase().replace(/-/g, " ") === curr;
-    });
-    setFormIndex(idx >= 0 ? idx : 0);
-  }, [formsList, images, currentImageIndex, pokemon?.name]);
-
-  async function nextForm() {
-    if (!formsList || !formsList.length) return;
-    const next = (formIndex + 1) % formsList.length;
-    setFormIndex(next);
-    const formName = String(formsList[next]?.name || "").toLowerCase().replace(/\s*\(shiny\)\s*$/, "").trim();
-    const idx = findBestIndexFor(formName);
-    if (idx != null) {
-      setCurrentImageIndex(idx);
+    const activeName = sanitizeSearchValue(pokemon?._formInfo?.name || pokemon?.name || formsList[0]?.name || "");
+    if (!activeName) {
+      setFormIndex(0);
       return;
     }
+    const idx = formsList.findIndex((f) => sanitizeSearchValue(f?.name) === activeName);
+    setFormIndex(idx >= 0 ? idx : 0);
+  }, [formsList, pokemon?.name, pokemon?._formInfo?.name]);
+
+  async function loadFormEntry(entry) {
+    if (!entry || !entry.url) return;
     try {
-      // fetch the pokemon-form endpoint (formsList entries point to /pokemon-form/:id)
-      const r = await fetch(formsList[next].url);
-      if (r.ok) {
-        const formData = await r.json();
-        // pokemon-form resource often includes a 'pokemon' object linking to the actual pokemon variant
-        const pName = formData.pokemon?.name;
-        if (pName) {
-          setCurrentId(String(pName));
-          return;
-        }
-        // fallback: sometimes formData has sprites; attempt to use any sprite
-        const spriteFromForm = formData.sprites?.front_default || formData.sprites?.front_shiny || null;
-        if (spriteFromForm) {
-          // add as temporary image or find best match - here we just attempt to set orb by switching currentImageIndex if exists
-          const found = images.findIndex((it) => it.url === spriteFromForm || it.sprite === spriteFromForm);
-          if (found !== -1) setCurrentImageIndex(found);
-        }
+      const r = await fetch(entry.url);
+      if (!r.ok) return;
+      const formData = await r.json();
+      const targetName = formData?.name || entry.name || formData?.pokemon?.name;
+      const normalized = sanitizeSearchValue(targetName);
+      if (normalized) {
+        setCurrentId(normalized);
+        return;
+      }
+      const spriteFromForm = formData.sprites?.front_default || formData.sprites?.front_shiny || null;
+      if (spriteFromForm) {
+        const found = images.findIndex((it) => it.url === spriteFromForm || it.sprite === spriteFromForm);
+        if (found !== -1) setCurrentImageIndex(found);
       }
     } catch (err) {
       void err;
     }
   }
+
+  async function nextForm() {
+    if (!formsList || !formsList.length) return;
+    const next = (formIndex + 1) % formsList.length;
+    setFormIndex(next);
+    const entry = formsList[next];
+    if (!entry) return;
+    const formName = String(entry.name || "").toLowerCase().replace(/\s*\(shiny\)\s*$/, "").trim();
+    const idx = formName ? findBestIndexFor(formName) : null;
+    if (idx != null) {
+      setCurrentImageIndex(idx);
+      updateCurrentIdFromImage(idx, entry.name || formName);
+      return;
+    }
+    const normalized = sanitizeSearchValue(entry.name);
+    if (normalized) {
+      setCurrentId(normalized);
+      return;
+    }
+    await loadFormEntry(entry);
+  }
   async function prevForm() {
     if (!formsList || !formsList.length) return;
     const prev = (formIndex - 1 + formsList.length) % formsList.length;
     setFormIndex(prev);
-    const formName = String(formsList[prev]?.name || "").toLowerCase().replace(/\s*\(shiny\)\s*$/, "").trim();
-    const idx = findBestIndexFor(formName);
+    const entry = formsList[prev];
+    if (!entry) return;
+    const formName = String(entry.name || "").toLowerCase().replace(/\s*\(shiny\)\s*$/, "").trim();
+    const idx = formName ? findBestIndexFor(formName) : null;
     if (idx != null) {
       setCurrentImageIndex(idx);
+      updateCurrentIdFromImage(idx, entry.name || formName);
       return;
     }
-    try {
-      const r = await fetch(formsList[prev].url);
-      if (r.ok) {
-        const formData = await r.json();
-        const pName = formData.pokemon?.name;
-        if (pName) {
-          setCurrentId(String(pName));
-          return;
-        }
-        const spriteFromForm = formData.sprites?.front_default || formData.sprites?.front_shiny || null;
-        if (spriteFromForm) {
-          const found = images.findIndex((it) => it.url === spriteFromForm || it.sprite === spriteFromForm);
-          if (found !== -1) setCurrentImageIndex(found);
-        }
-      }
-    } catch (err) {
-      void err;
+    const normalized = sanitizeSearchValue(entry.name);
+    if (normalized) {
+      setCurrentId(normalized);
+      return;
     }
+    await loadFormEntry(entry);
   }
 
   // Reset / clear pokedex entry (orange circle): call clear() from hook and clear currentId
@@ -691,9 +1227,20 @@ export default function PokedexShell({ initial = 1 }) {
   const megaAsset = assetMap["mega"];
   const otherAsset = assetMap["other-forms"] || assetMap["other-forms.png"] || assetMap["other-forms.jpg"];
   const filterAsset = assetMap["pokemon-filter"]; // expected name pokemon-filter.png in assets
+  const overrideToggleIcon = assetMap["pokedex-icon"];
 
   // clickable style
   const clickableStyle = { cursor: "pointer" };
+  const hoverable = {
+    onMouseEnter: (e) => {
+      e.currentTarget.style.transform = "translateY(-2px)";
+      e.currentTarget.style.filter = "brightness(1.05)";
+    },
+    onMouseLeave: (e) => {
+      e.currentTarget.style.transform = "translateY(0)";
+      e.currentTarget.style.filter = "brightness(1)";
+    },
+  };
 
   // orb image chosen depending on shiny state
   const orbDisplayedUrl = useMemo(() => {
@@ -920,12 +1467,12 @@ export default function PokedexShell({ initial = 1 }) {
           <rect x="173" y="525" rx="3" width="74" height="26" fill="#12b23f" stroke="#0a6b1f" />
           <rect x="264" y="525" rx="3" width="74" height="26" fill="#ff8a3f" stroke="#a84a15" />
           <g transform="translate(328,420)">
-            <rect x="54" y="120" width="36" height="88" rx="6" fill="#111"/>
-            <text x="72"y="136" fontSize="20" fill="#333" fontFamily="sans-serif" textAnchor="middle" dominantBaseline="middle">▲</text>            
-            <text x="72"y="194" fontSize="20" fill="#333" fontFamily="sans-serif" textAnchor="middle" dominantBaseline="middle">▼</text>            
+            <rect x="54" y="120" width="36" height="88" rx="6" fill="#111" />
+            <text x="72" y="136" fontSize="20" fill="#333" fontFamily="sans-serif" textAnchor="middle" dominantBaseline="middle">^</text>
+            <text x="72" y="194" fontSize="20" fill="#333" fontFamily="sans-serif" textAnchor="middle" dominantBaseline="middle">v</text>
             <rect x="28" y="146" width="88" height="36" rx="6" fill="#111" />
-            <text x="33" y="171" fontSize="20" fill="#333" fontFamily="sans-serif">◀</text>
-            <text x="94" y="171" fontSize="20" fill="#333" fontFamily="sans-serif">▶</text>    
+            <text x="43" y="171" fontSize="20" fill="#333" fontFamily="sans-serif">&lt;</text>
+            <text x="104" y="171" fontSize="20" fill="#333" fontFamily="sans-serif">&gt;</text>
           </g>
            {/* teal module */}
           <rect x="184" y="616" rx="14" width="140" height="66" fill="#046f62" />
@@ -952,13 +1499,13 @@ export default function PokedexShell({ initial = 1 }) {
           <rect x="848" y="494" rx="12" width="74" height="20" fill="#ff8a3f" />
 
           <rect x={696 + CHEVRON_X_OFFSET} y="496" rx="2" width="22" height="16" fill="#cfcfcf" stroke="#6a6a6a" />
-          <text x={702 + CHEVRON_X_OFFSET} y="507.5" fontSize="10" fill="#6a2a2a" fontFamily="sans-serif">◀</text>
+          <text x={702 + CHEVRON_X_OFFSET} y="507.5" fontSize="10" fill="#6a2a2a" fontFamily="sans-serif">&lt;</text>
 
           <rect x={723 + CHEVRON_X_OFFSET} y="496" rx="2" width="22" height="16" fill="#cfcfcf" stroke="#6a6a6a" />
-          <text x={730 + CHEVRON_X_OFFSET} y="507.5" fontSize="10" fill="#6a2a2a" fontFamily="sans-serif">▶</text>
-          </g>
+          <text x={730 + CHEVRON_X_OFFSET} y="507.5" fontSize="10" fill="#6a2a2a" fontFamily="sans-serif">&gt;</text>
+        </g>
 
-          {/* held items — replaced by foreignObject below */}
+          {/* held items - replaced by foreignObject below */}
           <rect x="611.5" y="530" rx="6" ry="2" width="90" height="50" fill="url(#screenGrad)" stroke="#111" strokeWidth="1" />
 
         {/* SIZE COMPARISON (foreignObject) */}
@@ -972,7 +1519,7 @@ export default function PokedexShell({ initial = 1 }) {
             />
           </div>
         </foreignObject>
-        {/* HELD ITEMS (foreignObject) */}
+          {/* held items - replaced by foreignObject below */}
         <foreignObject x="615" y="536" width="85" height="42">
           <div xmlns="http://www.w3.org/1999/xhtml" style={{ width: "100%", height: "100%" }}>
             {/* Prefer heldItemsDetails (contains sprites) but keep backwards compatibility */}
@@ -980,9 +1527,9 @@ export default function PokedexShell({ initial = 1 }) {
           </div>
         </foreignObject>
 
-        {/* small sprite inside orb lens — now uses orbDisplayedUrl */}
+        {/* small sprite inside orb lens - now uses orbDisplayedUrl */}
         <image
-          href={orbDisplayedUrl || smallSpriteUrl}
+          href={orbDisplayedUrl || smallSpriteUrl || null}
           x={ORB_CX - spriteSide / 2}
           y={ORB_CY - spriteSide / 2}
           width={spriteSide}
@@ -991,11 +1538,24 @@ export default function PokedexShell({ initial = 1 }) {
           clipPath="url(#orbClip)"
           style={{ imageRendering: "pixelated" }}
         />
+        {canEdit ? (
+          <circle
+            cx={ORB_CX}
+            cy={ORB_CY}
+            r={ORB_R}
+            fill="rgba(255,255,255,0.02)"
+            stroke="transparent"
+            onClick={handleOrbOverrideClick}
+            style={{ cursor: "copy" }}
+          >
+            <title>Click to replace orb sprite (hold Shift for shiny).</title>
+          </circle>
+        ) : null}
 
         {/* main artwork clipped to frame */}
         <g clipPath="url(#mainFrameClip)">
           <image
-            href={currentImageUrl || assetMap["placeholder-200"] || ""}
+            href={currentImageUrl || assetMap["placeholder-200"] || null}
             x={FRAME_X}
             y={FRAME_Y}
             width={FRAME_W}
@@ -1004,6 +1564,20 @@ export default function PokedexShell({ initial = 1 }) {
             style={{ pointerEvents: "none" }}
           />
         </g>
+        {canEdit ? (
+          <rect
+            x={FRAME_X}
+            y={FRAME_Y}
+            width={FRAME_W}
+            height={FRAME_H}
+            fill="rgba(255,255,255,0.02)"
+            stroke="transparent"
+            onClick={handleArtOverrideClick}
+            style={{ cursor: "copy" }}
+          >
+            <title>Click to replace artwork (hold Shift for shiny artwork).</title>
+          </rect>
+        ) : null}
 
         {/* cry button (transparent) */}
         <g>
@@ -1044,15 +1618,15 @@ export default function PokedexShell({ initial = 1 }) {
                 style={{ width: "100%", textAlign: "center", fontSize: 9, textTransform: "capitalize", color: "#000", cursor: "text" }}
                 onClick={() => {
                   setEditingName(true);
-                  setNameInput(images?.[currentImageIndex]?.label ?? pokemon?.name ?? "");
+                  setNameInput(canonicalName);
                   setTimeout(() => {
                     const el = document.getElementById("pokedex-name-input");
                     if (el) el.focus();
                   }, 0);
                 }}
               >
-                {formatDisplayName(images?.[currentImageIndex]?.label ?? pokemon?.name ?? "")}
-              </div>
+                {formatDisplayName(resolvedDisplayName)}
+            </div>
             ) : (
               <input
                 id="pokedex-name-input"
@@ -1074,7 +1648,7 @@ export default function PokedexShell({ initial = 1 }) {
           </div>
         </foreignObject>
 
-        {/* transparent interactive blue circle — this is the clickable control for SHINY */}
+        {/* transparent interactive blue circle - this is the clickable control for SHINY */}
         <g>
           <circle
             cx="108"
@@ -1249,7 +1823,7 @@ export default function PokedexShell({ initial = 1 }) {
             style={clickableStyle}
           >
             <circle cx="740" cy="556" r="14" fill="#ffc43b" stroke="#a86a00" strokeWidth="3" />
-            <text x={734 + CHEVRON_X_OFFSET} y="560.5" fontSize="12" fill="#6a2a2a" fontFamily="sans-serif">◀</text>
+                                    <text x={734 + CHEVRON_X_OFFSET} y="560.5" fontSize="12" fill="#6a2a2a" fontFamily="sans-serif">&lt;</text>
           </g>
 
 
@@ -1312,7 +1886,7 @@ export default function PokedexShell({ initial = 1 }) {
         </g>
 
           <g>
-  {/* Filter icon — always subtle drop-shadow; stronger glow when a filter is active */}
+  {/* Filter icon - always subtle drop-shadow; stronger glow when a filter is active */}
   {filterAsset ? (
     <image
       href={filterAsset}
@@ -1423,7 +1997,7 @@ export default function PokedexShell({ initial = 1 }) {
         {/* Second header row: filtering status (fontSize: 6) */}
         <div style={{ fontSize: 6, color: filterError ? "#b91c1c" : "#374151", display: "flex", alignItems: "center", gap: 6 }}>
           <div style={{ textTransform: "capitalize", minWidth: 120 }}>
-            {filterLoading ? "Loading…" : filterError ? filterError : activeFilterType ? `Filtering: ${activeFilterType}` : "No filter"}
+            {filterLoading ? "Loading..." : filterError ? filterError : activeFilterType ? `Filtering: ${activeFilterType}` : "No filter"}
           </div>
         </div>
         {/* grid of type icons */}
@@ -1473,7 +2047,7 @@ export default function PokedexShell({ initial = 1 }) {
           )}
         </div>
 
-        {/* footer intentionally removed — header contains Reset + Close and inline status */}
+        {/* footer intentionally removed - header contains Reset + Close and inline status */}
       </div>
     </foreignObject>
   ) : null}
@@ -1487,7 +2061,7 @@ export default function PokedexShell({ initial = 1 }) {
               {species?.genera?.find((g) => g.language.name === "en")?.genus ?? species?.name ?? ""}
             </div>
             <div style={{ marginTop: 8, fontSize: 8.5, lineHeight: 1.5, textAlign: "justify" }}>
-              {species?.flavor_text_entries?.find((f) => f.language.name === "en")?.flavor_text?.replace(/\n|\f/g, " ") ?? "No data."}
+              {flavorText}
             </div>
           </div>
         </foreignObject>
@@ -1498,7 +2072,7 @@ export default function PokedexShell({ initial = 1 }) {
             <div style={{ width: "52%", display: "flex", flexDirection: "column", gap: 6 }}>
               <div style={{ fontWeight: 700, textAlign: "center" }}>ABILITY</div>
               <div style={{ textTransform: "capitalize", fontWeight: 700 }}>
-                {ability?.name ?? (pokemon?.abilities?.[0]?.ability?.name ?? "—")}
+                {ability?.name ?? (pokemon?.abilities?.[0]?.ability?.name ?? "???")}
               </div>
               <div style={{ fontSize: 6, lineHeight: 1.2 }}>
                 {ability?.short_effect ??
@@ -1511,19 +2085,23 @@ export default function PokedexShell({ initial = 1 }) {
             <div style={{ width: "48%", display: "flex", flexDirection: "column", gap: 6 }}>
               <div style={{ fontWeight: 700, textAlign: "center" }}>STATS</div>
               <div style={{ display: "flex", flexDirection: "column", gap: 1 }}>
-                {stats?.map((s) => {
-                  const value = s.value ?? s.base_stat ?? 0;
-                  const pct = Math.round((value / maxStat) * 100);
-                  return (
-                    <div key={s.name} style={{ display: "flex", alignItems: "center", gap: 1 }}>
-                      <div style={{ width: 48, fontSize: 5, textTransform: "capitalize" }}>{s.name}</div>
-                      <div style={{ flex: 1, height: 10, overflow: "hidden" }}>
-                        <div style={{ width: `${pct}%`, height: "60%", borderRadius: 6, background: "#7ff971", boxShadow: "inset 0 -2px 0 rgba(0,0,0,0.15)" }} />
+                {Array.isArray(stats) && stats.length > 0 ? (
+                  stats.map((s) => {
+                    const value = s.value ?? s.base_stat ?? 0;
+                    const pct = Math.round((value / maxStat) * 100);
+                    return (
+                      <div key={s.name} style={{ display: "flex", alignItems: "center", gap: 1 }}>
+                        <div style={{ width: 48, fontSize: 5, textTransform: "capitalize" }}>{s.name}</div>
+                        <div style={{ flex: 1, height: 10, overflow: "hidden" }}>
+                          <div style={{ width: `${pct}%`, height: "60%", borderRadius: 6, background: "#7ff971", boxShadow: "inset 0 -2px 0 rgba(0,0,0,0.15)" }} />
+                        </div>
+                        <div style={{ width: 28, textAlign: "right", fontSize: 6 }}>{value}</div>
                       </div>
-                      <div style={{ width: 28, textAlign: "right", fontSize: 6 }}>{value}</div>
-                    </div>
-                  );
-                }) ?? <div style={{ fontSize: 6 }}>—</div>}
+                    );
+                  })
+                ) : (
+                  <div style={{ fontSize: 6 }}>???</div>
+                )}
               </div>
             </div>
           </div>
@@ -1532,11 +2110,20 @@ export default function PokedexShell({ initial = 1 }) {
         {/* move pills */}
         <foreignObject x="768" y="501" width="150" height="56">
           <div xmlns="http://www.w3.org/1999/xhtml" style={{ display: "flex", flexDirection: "row", gap: 20 }}>
-            {(pagedMoves && pagedMoves.length > 0) ? pagedMoves.map((m) => (
-              <div key={m.name} className="gameboy-font" style={{ fontWeight: 700, width: 140, whiteSpace: "nowrap", fontSize: 5, display: "flex", alignItems: "center", justifyContent: "center" }} title={m.name.replace("-", " ")}>
-                {m.name.replace("-", " ")}
-              </div>
-            )) : <div className="gameboy-font">—</div>}
+            {pagedMoves && pagedMoves.length > 0 ? (
+              pagedMoves.map((m) => (
+                <div
+                  key={m.name}
+                  className="gameboy-font"
+                  style={{ fontWeight: 700, width: 140, whiteSpace: "nowrap", fontSize: 5, display: "flex", alignItems: "center", justifyContent: "center" }}
+                  title={m.name.replace("-", " ")}
+                >
+                  {m.name.replace("-", " ")}
+                </div>
+              ))
+            ) : (
+              <div className="gameboy-font">???</div>
+            )}
           </div>
         </foreignObject>
 
@@ -1724,7 +2311,7 @@ export default function PokedexShell({ initial = 1 }) {
           )}
         </g>
 
-        {/* Prev chevron (left) — shown only when there are >3 evolutions */}
+        {/* Prev chevron (left) - shown only when there are >3 evolutions */}
         {showChevrons ? (
           <g
             transform={`translate(${leftX - 20}, ${leftY + rectH / 2 - 10})`}
@@ -1738,11 +2325,11 @@ export default function PokedexShell({ initial = 1 }) {
             aria-hidden={false}
           >
             <rect x={42} y={-88} width={18} height={20} rx={4} fill="#cfcfcf" stroke="#6a6a6a" />
-            <text x={50} y={-74} fontSize="12" fill="#6a2a2a" fontFamily="sans-serif" textAnchor="middle">◀</text>
+                      <text x={50} y={-74} fontSize="12" fill="#6a2a2a" fontFamily="sans-serif" textAnchor="middle">&lt;</text>
           </g>
         ) : null}
 
-        {/* Next chevron (right) — shown only when there are >3 evolutions */}
+        {/* Next chevron (right) - shown only when there are >3 evolutions */}
         {showChevrons ? (
           <g
             transform={`translate(${rightX + rectW + 6}, ${rightY + rectH / 2 - 10})`}
@@ -1756,7 +2343,7 @@ export default function PokedexShell({ initial = 1 }) {
             aria-hidden={false}
           >
             <rect x={0} y={0} width={18} height={20} rx={4} fill="#cfcfcf" stroke="#6a6a6a" />
-            <text x={9.5} y={14} fontSize="12" fill="#6a2a2a" fontFamily="sans-serif" textAnchor="middle">▶</text>
+                      <text x={9.5} y={14} fontSize="12" fill="#6a2a2a" fontFamily="sans-serif" textAnchor="middle">&gt;</text>
           </g>
         ) : null}
       </g>
@@ -1770,6 +2357,501 @@ export default function PokedexShell({ initial = 1 }) {
           {loading ? "LOADING POKEMON..." : error ? "ERROR LOADING POKEMON!" : ""}
         </text>
       </svg>
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept="image/*"
+        style={{ display: "none" }}
+        onChange={handleFileSelection}
+      />
+      {overrideToggleIcon ? (
+        <button
+          type="button"
+          onClick={() => setShowOverridePanel((v) => !v)}
+          onMouseEnter={hoverable.onMouseEnter}
+          onMouseLeave={hoverable.onMouseLeave}
+          style={{
+            position: "absolute",
+            left: -58,
+            top: 170,
+            width: 48,
+            height: 48,
+            cursor: "pointer",
+            padding: 0,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            border: "none",
+            background: "transparent",
+            filter: showOverridePanel ? "drop-shadow(0 0 6px rgba(0,0,0,0.55))" : "drop-shadow(0 0 4px rgba(0,0,0,0.35))",
+            transform: "rotate(-4deg)",
+          }}
+          title={showOverridePanel ? "Hide override controls" : "Show override controls"}
+        >
+          <img
+            src={overrideToggleIcon}
+            alt="Override controls"
+            style={{ width: "100%", height: "100%", objectFit: "contain", imageRendering: "pixelated" }}
+          />
+        </button>
+      ) : null}
+
+      {showOverridePanel ? (
+        <div
+          id="override-panel"
+          style={{
+            position: "absolute",
+            left: -245,
+            top: 220,
+            width: 230,
+            maxHeight: "87vh",
+            overflowY: "auto",
+            background: "#d41414",
+            border: "3px solid #7a0c0c",
+            borderRadius: 14,
+            padding: 10,
+            boxShadow: "0 12px 28px rgba(0,0,0,0.42)",
+            fontFamily: "'Gameboy', monospace",
+            color: "#fffbe6",
+            fontSize: 11,
+            zIndex: 5,
+            scrollbarWidth: "none",
+            msOverflowStyle: "none",
+          }}
+        >
+          <style>{`div#override-panel::-webkit-scrollbar{display:none;}`}</style>
+          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            <div
+              style={{
+                flex: 1,
+                fontWeight: 700,
+                fontSize: 11,
+                textTransform: "uppercase",
+                letterSpacing: 0.5,
+                textAlign: "left",
+              }}
+            >
+              Override Console
+            </div>
+            <button
+              type="button"
+              onClick={() => setShowOverridePanel(false)}
+              {...hoverable}
+              style={{
+                fontSize: 10,
+                color: "white",
+                cursor: "pointer",
+                fontFamily: "'Gameboy'",
+                textAlign: "center",
+              }}
+            >X</button>
+          </div>
+          <div style={{ marginTop: 6, color: hasOverrideApi ? "#bafacb" : "#ffe0e0" }}>
+            API: {hasOverrideApi ? "Connected" : "Not configured"}
+          </div>
+          <div style={{ marginTop: 8, display: "flex", flexWrap: "wrap", gap: 8 }}>
+            <button
+              type="button"
+              onClick={toggleEditMode}
+              disabled={!hasOverrideApi || !pokemon?.id}
+              onMouseEnter={hoverable.onMouseEnter}
+              onMouseLeave={hoverable.onMouseLeave}
+              style={{
+                padding: "4px 8px",
+                background: canEdit ? "#5ac85a" : "#fff27c",
+                color: "#3a0a0a",
+                border: "2px solid #7a0c0c",
+                borderRadius: 10,
+                cursor: hasOverrideApi && pokemon?.id ? "pointer" : "not-allowed",
+                fontFamily: "'Gameboy', monospace",
+              }}
+            >
+              {canEdit ? "Exit edit mode" : "Enter edit mode"}
+            </button>
+            <button
+              type="button"
+              onClick={promptForAdminToken}
+              disabled={!hasOverrideApi}
+              onMouseEnter={hoverable.onMouseEnter}
+              onMouseLeave={hoverable.onMouseLeave}
+              style={{
+                padding: "4px 8px",
+                background: "#fff27c",
+                color: "#3a0a0a",
+                border: "2px solid #7a0c0c",
+                borderRadius: 10,
+                cursor: hasOverrideApi ? "pointer" : "not-allowed",
+                fontFamily: "'Gameboy', monospace",
+              }}
+            >
+              Set token
+            </button>
+            {adminToken ? (
+              <button
+                type="button"
+                onClick={clearAdminToken}
+                onMouseEnter={hoverable.onMouseEnter}
+                onMouseLeave={hoverable.onMouseLeave}
+                style={{
+                  padding: "4px 8px",
+                  background: "#ffb3b3",
+                  color: "#3a0a0a",
+                  border: "2px solid #7a0c0c",
+                  borderRadius: 10,
+                  fontFamily: "'Gameboy', monospace",
+                }}
+              >
+                Clear token
+              </button>
+            ) : null}
+          </div>
+          {operationStatus ? (
+            <div
+              style={{
+                marginTop: 8,
+                padding: "6px 8px",
+                borderRadius: 10,
+                background: operationStatus.type === "error" ? "#5e0b0b" : "#0f6130",
+                color: "#fff",
+                lineHeight: 1.4,
+                border: "2px solid rgba(0,0,0,0.25)",
+              }}
+            >
+              {operationStatus.message}
+            </div>
+          ) : null}
+          {canEdit ? (
+            <>
+              <div style={{ marginTop: 10, fontWeight: 700, borderTop: "2px solid #a01818", paddingTop: 8 }}>
+                Name & Description ({pokemon?.name ?? "??"})
+              </div>
+              <label style={{ display: "block", marginTop: 6, fontSize: 11, fontWeight: 700 }}>Display name</label>
+              <input
+                type="text"
+                value={overrideDraft?.displayName ?? ""}
+                onChange={(e) => handleDraftChange("displayName", e.target.value)}
+                style={{
+                  width: "100%",
+                  padding: "6px 6px",
+                  borderRadius: 8,
+                  border: "2px solid #7a0c0c",
+                  background: "#fff7d1",
+                  color: "#2a0a0a",
+                  fontFamily: "'Gameboy', monospace",
+                }}
+                maxLength={60}
+              />
+              <label style={{ display: "block", marginTop: 6, fontSize: 11, fontWeight: 700 }}>Description</label>
+              <textarea
+                value={overrideDraft?.description ?? ""}
+                onChange={(e) => handleDraftChange("description", e.target.value)}
+                style={{
+                  width: "100%",
+                  padding: "6px 6px",
+                  borderRadius: 8,
+                  border: "2px solid #7a0c0c",
+                  background: "#fff7d1",
+                  color: "#2a0a0a",
+                  fontFamily: "'Gameboy', monospace",
+                  minHeight: 80,
+                  resize: "vertical",
+                }}
+              />
+              <div style={{ marginTop: 6, display: "flex", gap: 8 }}>
+                <button
+                type="button"
+                onClick={handleSaveTextFields}
+                disabled={!draftDirty || overrideBusy}
+                onMouseEnter={hoverable.onMouseEnter}
+                onMouseLeave={hoverable.onMouseLeave}
+                style={{
+                  flex: 1,
+                  background: "#5ac85a",
+                    color: "#1f3a1f",
+                    border: "2px solid #2f7a2f",
+                    borderRadius: 10,
+                    padding: "6px 8px",
+                    cursor: draftDirty && !overrideBusy ? "pointer" : "not-allowed",
+                    fontFamily: "'Gameboy', monospace",
+                  }}
+                >
+                  Save text
+                </button>
+              <button
+                type="button"
+                onClick={handleResetText}
+                disabled={overrideBusy}
+                onMouseEnter={hoverable.onMouseEnter}
+                onMouseLeave={hoverable.onMouseLeave}
+                style={{
+                  flex: 1,
+                  background: "#ffb3b3",
+                  color: "#3a0a0a",
+                  border: "2px solid #7a0c0c",
+                  borderRadius: 10,
+                  padding: "6px 8px",
+                  cursor: overrideBusy ? "not-allowed" : "pointer",
+                  fontFamily: "'Gameboy', monospace",
+                }}
+              >
+                Reset text
+              </button>
+              </div>
+
+              <div style={{ marginTop: 12, fontWeight: 700, borderTop: "2px solid #a01818", paddingTop: 8, textAlign: "center" }}>
+                Artwork & Sprites
+              </div>
+              <p style={{ fontSize: 10, lineHeight: 1.4, marginTop: 4, textAlign: "left" }}>
+                Click the orb for sprites (Shift = shiny).
+              </p>
+              <p style={{ fontSize: 10, lineHeight: 1.4, marginTop: 4, textAlign: "left" }}>
+                Click the artwork window for main art (Shift = shiny).</p>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6, marginTop: 8 }}>
+                <button
+                  type="button"
+                  onClick={() => beginUpload("spriteNormal")}
+                  disabled={overrideBusy}
+                  onMouseEnter={hoverable.onMouseEnter}
+                  onMouseLeave={hoverable.onMouseLeave}
+                  style={{ fontFamily: "'Gameboy', monospace" }}
+                >
+                  Upload orb sprite
+                </button>
+                <button
+                  type="button"
+                  onClick={() => persistOverridePatch({ spriteNormal: null }, "Orb sprite reset.")}
+                  disabled={overrideBusy}
+                  onMouseEnter={hoverable.onMouseEnter}
+                  onMouseLeave={hoverable.onMouseLeave}
+                  style={{ fontFamily: "'Gameboy', monospace" }}
+                >
+                  Reset orb sprite
+                </button>
+                <button
+                  type="button"
+                  onClick={() => beginUpload("spriteShiny")}
+                  disabled={overrideBusy}
+                  onMouseEnter={hoverable.onMouseEnter}
+                  onMouseLeave={hoverable.onMouseLeave}
+                  style={{ fontFamily: "'Gameboy', monospace" }}
+                >
+                  Upload shiny sprite
+                </button>
+                <button
+                  type="button"
+                  onClick={() => persistOverridePatch({ spriteShiny: null }, "Shiny sprite reset.")}
+                  disabled={overrideBusy}
+                  onMouseEnter={hoverable.onMouseEnter}
+                  onMouseLeave={hoverable.onMouseLeave}
+                  style={{ fontFamily: "'Gameboy', monospace" }}
+                >
+                  Reset shiny sprite
+                </button>
+                <button
+                  type="button"
+                  onClick={() => beginUpload("artNormal")}
+                  disabled={overrideBusy}
+                  onMouseEnter={hoverable.onMouseEnter}
+                  onMouseLeave={hoverable.onMouseLeave}
+                  style={{ fontFamily: "'Gameboy', monospace" }}
+                >
+                  Upload artwork
+                </button>
+                <button
+                  type="button"
+                  onClick={() => persistOverridePatch({ artNormal: null }, "Artwork reset.")}
+                  disabled={overrideBusy}
+                  onMouseEnter={hoverable.onMouseEnter}
+                  onMouseLeave={hoverable.onMouseLeave}
+                  style={{ fontFamily: "'Gameboy', monospace" }}
+                >
+                  Reset artwork
+                </button>
+                <button
+                  type="button"
+                  onClick={() => beginUpload("artShiny")}
+                  disabled={overrideBusy}
+                  onMouseEnter={hoverable.onMouseEnter}
+                  onMouseLeave={hoverable.onMouseLeave}
+                  style={{ fontFamily: "'Gameboy', monospace" }}
+                >
+                  Upload shiny art
+                </button>
+                <button
+                  type="button"
+                  onClick={() => persistOverridePatch({ artShiny: null }, "Shiny artwork reset.")}
+                  disabled={overrideBusy}
+                  onMouseEnter={hoverable.onMouseEnter}
+                  onMouseLeave={hoverable.onMouseLeave}
+                  style={{ fontFamily: "'Gameboy', monospace" }}
+                >
+                  Reset shiny art
+                </button>
+              </div>
+
+              <div style={{ marginTop: 12, fontWeight: 700, borderTop: "2px solid #a01818", paddingTop: 8, textAlign: "center" }}>
+                Held Item Overrides
+              </div>
+              {overrideHeldItems.length ? (
+                <ul style={{ marginTop: 6, paddingLeft: 14, display: "flex", flexDirection: "column", gap: 4 }}>
+                  {overrideHeldItems.map((item) => (
+                    <li key={item.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 6 }}>
+                      <div style={{ display: "flex", flexDirection: "column" }}>
+                        <span style={{ fontWeight: 700 }}>{item.itemName}</span>
+                        {item.itemSprite ? (
+                          <a href={item.itemSprite} target="_blank" rel="noreferrer" style={{ fontSize: 10, color: "#fff7d1" }}>
+                            sprite
+                          </a>
+                        ) : null}
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => handleDeleteHeldItem(item.id)}
+                        disabled={heldItemBusy}
+                        onMouseEnter={hoverable.onMouseEnter}
+                        onMouseLeave={hoverable.onMouseLeave}
+                        style={{
+                          padding: "2px 6px",
+                          background: "#ffb3b3",
+                          color: "#3a0a0a",
+                          border: "2px solid #7a0c0c",
+                          borderRadius: 8,
+                          cursor: heldItemBusy ? "not-allowed" : "pointer",
+                          fontFamily: "'Gameboy', monospace",
+                        }}
+                      >
+                        Remove
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <div style={{ marginTop: 4, fontSize: 11 }}>No held item overrides yet.</div>
+              )}
+              <div
+                style={{
+                  marginTop: 8,
+                  padding: 8,
+                  borderRadius: 10,
+                  background: "#b30f0f",
+                  border: "2px solid #7a0c0c",
+                  display: "flex",
+                  flexDirection: "column",
+                  gap: 6,
+                }}
+              >
+                <input
+                  type="text"
+                  placeholder="Held item name"
+                  value={newHeldItem.name}
+                  onChange={(e) => setNewHeldItem((prev) => ({ ...prev, name: e.target.value }))}
+                  style={{
+                    padding: "4px 6px",
+                    borderRadius: 6,
+                    border: "2px solid #7a0c0c",
+                    background: "#fff7d1",
+                    color: "#2a0a0a",
+                    fontFamily: "'Gameboy', monospace",
+                  }}
+                />
+                <input
+                  type="text"
+                  placeholder="Sprite URL (optional)"
+                  value={newHeldItem.sprite}
+                  onChange={(e) => setNewHeldItem((prev) => ({ ...prev, sprite: e.target.value }))}
+                  style={{
+                    padding: "4px 6px",
+                    borderRadius: 6,
+                    border: "2px solid #7a0c0c",
+                    background: "#fff7d1",
+                    color: "#2a0a0a",
+                    fontFamily: "'Gameboy', monospace",
+                  }}
+                />
+                <button
+                  type="button"
+                  onClick={handleHeldItemUploadClick}
+                  disabled={heldItemBusy}
+                  onMouseEnter={hoverable.onMouseEnter}
+                  onMouseLeave={hoverable.onMouseLeave}
+                  style={{
+                    alignSelf: "flex-start",
+                    padding: "2px 6px",
+                    background: "#fff27c",
+                    color: "#3a0a0a",
+                    border: "2px solid #7a0c0c",
+                    borderRadius: 8,
+                    cursor: heldItemBusy ? "not-allowed" : "pointer",
+                    fontFamily: "'Gameboy', monospace",
+                  }}
+                >
+                  Upload icon
+                </button>
+                <textarea
+                  placeholder="Notes (optional)"
+                  value={newHeldItem.notes}
+                  onChange={(e) => setNewHeldItem((prev) => ({ ...prev, notes: e.target.value }))}
+                  style={{
+                    padding: "4px 6px",
+                    borderRadius: 6,
+                    border: "2px solid #7a0c0c",
+                    background: "#fff7d1",
+                    color: "#2a0a0a",
+                    fontFamily: "'Gameboy', monospace",
+                    minHeight: 60,
+                    resize: "vertical",
+                  }}
+                />
+                <button
+                  type="button"
+                  onClick={handleAddHeldItem}
+                  disabled={heldItemBusy}
+                  onMouseEnter={hoverable.onMouseEnter}
+                  onMouseLeave={hoverable.onMouseLeave}
+                  style={{
+                    padding: "6px 8px",
+                    background: "#5ac85a",
+                    color: "#1f3a1f",
+                    border: "2px solid #2f7a2f",
+                    borderRadius: 10,
+                    cursor: heldItemBusy ? "not-allowed" : "pointer",
+                    fontFamily: "'Gameboy', monospace",
+                  }}
+                >
+                  Save held item
+                </button>
+              </div>
+
+              <button
+                type="button"
+                onClick={handleOverrideReset}
+                disabled={overrideBusy || heldItemBusy}
+                onMouseEnter={hoverable.onMouseEnter}
+                onMouseLeave={hoverable.onMouseLeave}
+                style={{
+                  marginTop: 12,
+                  width: "100%",
+                  background: "#5e0b0b",
+                  color: "#fff7d1",
+                  border: "2px solid #a01818",
+                  padding: "8px 10px",
+                  borderRadius: 12,
+                  cursor: overrideBusy || heldItemBusy ? "not-allowed" : "pointer",
+                  fontFamily: "'Gameboy', monospace",
+                }}
+              >
+                Delete override entry
+              </button>
+            </>
+          ) : (
+            <div style={{ marginTop: 8, fontSize: 11, lineHeight: 1.5 }}>
+              {hasOverrideApi
+                ? "Enter edit mode to customize this Pokémon. Hold Shift on orb/art to update shiny versions."
+                : "Set VITE_OVERRIDE_API_URL in your Vite env and restart the client to enable override editing."}
+            </div>
+          )}
+        </div>
+      ) : null}
     </div>
   );
 }

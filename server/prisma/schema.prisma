@@ -1,0 +1,39 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model PokemonOverride {
+  id             Int      @id @default(autoincrement())
+  pokemonId      Int
+  slug           String   @unique
+  displayName    String?
+  description    String?
+  spriteNormal   String?
+  spriteShiny    String?
+  artNormal      String?
+  artShiny       String?
+  metadataJson   String?
+  heldItems      PokemonHeldItemOverride[]
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+}
+
+model PokemonHeldItemOverride {
+  id          Int      @id @default(autoincrement())
+  pokemonId   Int
+  itemName    String
+  itemSprite  String?
+  notes       String?
+  overrideId  Int
+  override    PokemonOverride @relation(fields: [overrideId], references: [id])
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}

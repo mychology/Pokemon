@@ -20,10 +20,35 @@ const simpleCache = {
   species: new Map(),
   ability: new Map(),
   move: new Map(),
-  evo: new Map(),
   form: new Map(),
   item: new Map(),
 };
+
+const overrideApiBase = (import.meta.env.VITE_OVERRIDE_API_URL || "").replace(/\/$/, "");
+
+async function fetchOverrideEntry(identifier, signal) {
+  if (!overrideApiBase) return null;
+  const key = String(identifier ?? "").trim();
+  if (!key) return null;
+  const url = `${overrideApiBase}/api/overrides/${encodeURIComponent(key)}`;
+  try {
+    const res = await fetch(url, { signal });
+    if (!res.ok) return null;
+    const data = await res.json();
+    return data?.override ?? null;
+  } catch (err) {
+    if (err?.name === "AbortError") throw err;
+    return null;
+  }
+}
+
+function mapCustomHeldItems(items = []) {
+  return items.map((item) => ({
+    name: item.itemName,
+    sprite: item.itemSprite ?? null,
+    raw: item,
+  }));
+}
 
 function idFromUrl(url) {
   if (!url) return null;
@@ -59,6 +84,8 @@ export default function usePokemon(idOrName) {
   const [galleryIndex, setGalleryIndex] = useState(0);
   const [galleryImages, setGalleryImages] = useState([]);
   const [cryUrl, setCryUrl] = useState(null);
+  const [overrideData, setOverrideData] = useState(null);
+  const [refreshKey, setRefreshKey] = useState(0);
 
   // NEW: forms array (from p.forms)
   const [forms, setForms] = useState([]);
@@ -149,6 +176,13 @@ export default function usePokemon(idOrName) {
         if (!active) return;
         setSpecies(sp);
 
+        let override = null;
+        if (overrideApiBase) {
+          override = await fetchOverrideEntry(p.id ?? p.name, controller.signal);
+        }
+        if (!active) return;
+        setOverrideData(override);
+
         // 3) build image options: default + shiny, then try to prefetch forms / varieties
         const imgs = [];
         function pushImage(key, label, artworkUrl, spriteUrl) {
@@ -162,10 +196,12 @@ export default function usePokemon(idOrName) {
           });
         }
 
-        const baseArtwork = p?.sprites?.other?.["official-artwork"]?.front_default || p?.sprites?.front_default || null;
-        const baseSprite = p?.sprites?.front_default || null;
-        const baseShinyArtwork = p?.sprites?.other?.["official-artwork"]?.front_shiny || p?.sprites?.front_shiny || null;
-        const baseShinySprite = p?.sprites?.front_shiny || null;
+        const baseArtwork =
+          override?.artNormal || p?.sprites?.other?.["official-artwork"]?.front_default || p?.sprites?.front_default || null;
+        const baseSprite = override?.spriteNormal || p?.sprites?.front_default || null;
+        const baseShinyArtwork =
+          override?.artShiny || p?.sprites?.other?.["official-artwork"]?.front_shiny || p?.sprites?.front_shiny || null;
+        const baseShinySprite = override?.spriteShiny || p?.sprites?.front_shiny || null;
 
         // base (non-shiny) first
         pushImage("default", p.name, baseArtwork, baseSprite);
@@ -236,8 +272,9 @@ export default function usePokemon(idOrName) {
         const seen = new Set();
         for (const it of imgs) {
           if (!it || !it.url) continue;
-          if (seen.has(it.url)) continue;
-          seen.add(it.url);
+          const dedupKey = `${it.label || ""}__${it.url}`;
+          if (seen.has(dedupKey)) continue;
+          seen.add(dedupKey);
           uniqueImgs.push(it);
         }
 
@@ -319,14 +356,14 @@ export default function usePokemon(idOrName) {
               try {
                 if (simpleCache.item.has(itemName)) {
                   const it = simpleCache.item.get(itemName);
-                  const spriteUrl = it?.sprites?.default ?? it?.sprites?.['default'] ?? null;
+                  const spriteUrl = it?.sprites?.default ?? it?.sprites?.["default"] ?? null;
                   return { name: itemName, sprite: spriteUrl, raw: it };
                 }
                 const r = await fetch(`${API}/item/${encodeURIComponent(itemName)}`, { signal: controller.signal });
-                if (!r.ok) throw new Error('no');
+                if (!r.ok) throw new Error("no");
                 const it = await r.json();
                 simpleCache.item.set(itemName, it);
-                const spriteUrl = it?.sprites?.default ?? it?.sprites?.['default'] ?? null;
+                const spriteUrl = it?.sprites?.default ?? it?.sprites?.["default"] ?? null;
                 return { name: itemName, sprite: spriteUrl, raw: it };
               } catch (err) {
                 void err;
@@ -336,55 +373,63 @@ export default function usePokemon(idOrName) {
           );
           setHeldItemsDetails(res.filter(Boolean));
         }
-        await fetchHeldItemsDetails();
+        if (override?.heldItems?.length) {
+          setHeldItemsDetails(mapCustomHeldItems(override.heldItems));
+        } else {
+          await fetchHeldItemsDetails();
+        }
 
         // 6) evolution chain
         const evoUrl = sp?.evolution_chain?.url;
         if (evoUrl) {
-          const evoId = idFromUrl(evoUrl);
-          if (simpleCache.evo.has(evoId)) {
-            setEvoChain(simpleCache.evo.get(evoId));
-          } else {
-            try {
-              const r = await fetch(evoUrl, { signal: controller.signal });
-              if (r.ok) {
-                const evoData = await r.json();
-                const chain = [];
-                function traverse(node) {
-                  if (!node) return;
-                  const name = node.species?.name;
-                  if (name) chain.push(name);
-                  if (node.evolves_to && node.evolves_to.length) {
-                    for (const child of node.evolves_to) traverse(child);
-                  }
-                }
-                traverse(evoData.chain);
-                const chainWithSprites = await Promise.all(
-                  chain.slice(0, 6).map(async (sname) => {
-                    try {
-                      const r2 = await fetch(`${API}/pokemon/${encodeURIComponent(sname)}`, { signal: controller.signal });
-                      if (!r2.ok) throw new Error("no");
-                      const p2 = await r2.json();
-                      return {
-                        name: sname,
-                        id: p2.id,
-                        sprite:
-                          p2.sprites?.other?.["official-artwork"]?.front_default ||
-                          p2.sprites?.front_default ||
-                          null,
-                      };
-                    } catch (err) {
-                      void err;
-                      return { name: sname, id: null, sprite: null };
-                    }
-                  })
-                );
-                simpleCache.evo.set(evoId, chainWithSprites);
-                setEvoChain(chainWithSprites);
+          try {
+            const r = await fetch(evoUrl, { signal: controller.signal });
+            if (!r.ok) throw new Error("Failed to fetch evolution chain");
+            const evoData = await r.json();
+            const chain = [];
+            function traverse(node) {
+              if (!node) return;
+              const name = node.species?.name;
+              if (name) chain.push(name);
+              if (node.evolves_to && node.evolves_to.length) {
+                for (const child of node.evolves_to) traverse(child);
               }
-            } catch (err) {
-              void err;
             }
+            traverse(evoData.chain);
+            const chainWithSprites = await Promise.all(
+              chain.slice(0, 6).map(async (sname) => {
+                try {
+                  const r2 = await fetch(`${API}/pokemon/${encodeURIComponent(sname)}`, { signal: controller.signal });
+                  if (!r2.ok) throw new Error("no");
+                  const p2 = await r2.json();
+                  let overrideSprite = null;
+                  try {
+                    const ov = await fetchOverrideEntry(p2.id ?? sname, controller.signal);
+                    overrideSprite = ov?.artNormal || ov?.spriteNormal || null;
+                  } catch (err) {
+                    void err;
+                  }
+                  const sprite =
+                    overrideSprite ||
+                    p2.sprites?.other?.["official-artwork"]?.front_default ||
+                    p2.sprites?.front_default ||
+                    p2.sprites?.other?.home?.front_default ||
+                    p2.sprites?.other?.showdown?.front_default ||
+                    null;
+                  return {
+                    name: sname,
+                    id: p2.id,
+                    sprite,
+                  };
+                } catch (err) {
+                  void err;
+                  return { name: sname, id: null, sprite: null };
+                }
+              })
+            );
+            setEvoChain(chainWithSprites);
+          } catch (err) {
+            void err;
           }
         } else {
           setEvoChain([]);
@@ -402,7 +447,7 @@ export default function usePokemon(idOrName) {
       active = false;
       controller.abort();
     };
-  }, [idOrName]);
+  }, [idOrName, refreshKey]);
 
   // convenience: types, stats arrays
   const types = useMemo(() => (pokemon?.types || []).map((t) => t.type) || [], [pokemon]);
@@ -485,6 +530,15 @@ export default function usePokemon(idOrName) {
     return `https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/other/showdown/shiny/${pokemon.id}.gif`;
   }, [pokemon?.id]);
 
+  const defaultFlavorText = useMemo(() => {
+    const text =
+      species?.flavor_text_entries?.find((f) => f.language.name === "en")?.flavor_text?.replace(/\n|\f/g, " ") ?? "";
+    return text || "No data.";
+  }, [species]);
+
+  const flavorText = overrideData?.description || defaultFlavorText;
+  const displayName = overrideData?.displayName || pokemon?.name || "";
+
   // Reset/clear function to be called from component (so RESET button works)
   function clear() {
     // abort any in-flight requests
@@ -508,6 +562,11 @@ export default function usePokemon(idOrName) {
     setGalleryIndex(0);
     setForms([]);
     setCryUrl(null);
+    setOverrideData(null);
+  }
+
+  function refresh() {
+    setRefreshKey((k) => k + 1);
   }
 
   // convenience exposures
@@ -542,8 +601,12 @@ export default function usePokemon(idOrName) {
     gen5Gif,
     gen5GifShiny,
     cryUrl,
+    override: overrideData,
+    displayName,
+    flavorText,
     // added
     forms,
     clear,
+    refresh,
   };
 }
