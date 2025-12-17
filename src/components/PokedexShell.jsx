@@ -13,21 +13,11 @@ import {
   saveOverrideEntry,
   uploadOverrideFile,
 } from "../lib/overrideApi";
+import assetMap from "../lib/assetMap";
 
 const TYPE_FILTER_CACHE = new Map();
 const ADMIN_TOKEN_KEY = "pokedex-admin-token";
 
-/**
- * PokedexShell component
- *
- * - Blue circular button (left lower): toggle shiny for currently displayed form
- * - Mega button: cycle mega variants (supports multiple megas; returns to base after last)
- * - Other-forms button: cycle other non-mega, non-shiny forms (returns to base)
- * - Up/Down d-pad: iterate through pokemon-form endpoints (skip shiny)
- * - Orange chevron circle (right panel): RESET / clear current entry
- *
- * NOTE: layout intentionally preserved from your original file.
- */
 
 export default function PokedexShell({ initial = 1 }) {
   const [currentId, setCurrentId] = useState(initial);
@@ -64,40 +54,6 @@ export default function PokedexShell({ initial = 1 }) {
 
   // chevron tweak
   const CHEVRON_X_OFFSET = 0;
-
-  // load local assets (icons / UI images)
-  const [assetMap, setAssetMap] = useState({});
-  useEffect(() => {
-    let mounted = true;
-    async function load() {
-      try {
-        const modules = import.meta.glob("../assets/*.*");
-        const paths = Object.keys(modules);
-        const entries = await Promise.all(
-          paths.map(async (p) => {
-            try {
-              const mod = await modules[p]();
-              const fname = p.split("/").pop();
-              const key = fname.replace(/\.[^/.]+$/, "").toLowerCase();
-              return [key, mod?.default || mod];
-            } catch (err) {
-              void err;
-              return null;
-            }
-          })
-        );
-        const map = {};
-        for (const e of entries) if (e && e[0]) map[e[0]] = e[1];
-        if (mounted) setAssetMap(map);
-      } catch (err) {
-        void err;
-      }
-    }
-    load();
-    return () => {
-      mounted = false;
-    };
-  }, []);
 
   // Frame for main artwork (clipping)
   const FRAME_X = 94;
@@ -1468,11 +1424,11 @@ export default function PokedexShell({ initial = 1 }) {
           <rect x="264" y="525" rx="3" width="74" height="26" fill="#ff8a3f" stroke="#a84a15" />
           <g transform="translate(328,420)">
             <rect x="54" y="120" width="36" height="88" rx="6" fill="#111" />
-            <text x="72" y="136" fontSize="20" fill="#333" fontFamily="sans-serif" textAnchor="middle" dominantBaseline="middle">^</text>
+            <text x="72" y="139" fontSize="20" fill="#333" fontFamily="sans-serif" textAnchor="middle" dominantBaseline="middle">^</text>
             <text x="72" y="194" fontSize="20" fill="#333" fontFamily="sans-serif" textAnchor="middle" dominantBaseline="middle">v</text>
             <rect x="28" y="146" width="88" height="36" rx="6" fill="#111" />
-            <text x="43" y="171" fontSize="20" fill="#333" fontFamily="sans-serif">&lt;</text>
-            <text x="104" y="171" fontSize="20" fill="#333" fontFamily="sans-serif">&gt;</text>
+            <text x="36" y="171" fontSize="20" fill="#333" fontFamily="sans-serif">&lt;</text>
+            <text x="96" y="171" fontSize="20" fill="#333" fontFamily="sans-serif">&gt;</text>
           </g>
            {/* teal module */}
           <rect x="184" y="616" rx="14" width="140" height="66" fill="#046f62" />
@@ -1499,7 +1455,7 @@ export default function PokedexShell({ initial = 1 }) {
           <rect x="848" y="494" rx="12" width="74" height="20" fill="#ff8a3f" />
 
           <rect x={696 + CHEVRON_X_OFFSET} y="496" rx="2" width="22" height="16" fill="#cfcfcf" stroke="#6a6a6a" />
-          <text x={702 + CHEVRON_X_OFFSET} y="507.5" fontSize="10" fill="#6a2a2a" fontFamily="sans-serif">&lt;</text>
+          <text x={704 + CHEVRON_X_OFFSET} y="507.5" fontSize="10" fill="#6a2a2a" fontFamily="sans-serif">&lt;</text>
 
           <rect x={723 + CHEVRON_X_OFFSET} y="496" rx="2" width="22" height="16" fill="#cfcfcf" stroke="#6a6a6a" />
           <text x={730 + CHEVRON_X_OFFSET} y="507.5" fontSize="10" fill="#6a2a2a" fontFamily="sans-serif">&gt;</text>
@@ -1513,7 +1469,7 @@ export default function PokedexShell({ initial = 1 }) {
           <div xmlns="http://www.w3.org/1999/xhtml" style={{ width: "100%", height: "100%" }}>
             <SizeComparison
               silhouetteSrc={currentImageUrl || assetMap["placeholder-200"] || ""}
-              humanSrc={assetMap["human_comp"] || assetMap["human_comp.png"] || "/src/assets/human_comp.png"}
+              humanSrc={assetMap["human_comp"] || assetMap["human_comp.png"] || "/assets/human_comp.png"}
               pokemonHeightMeters={pokemon?.height != null ? pokemon.height * 0.1 : null}
               pokemonWeightKg={pokemon?.weight != null ? pokemon.weight * 0.1 : null}
             />
@@ -1734,7 +1690,6 @@ export default function PokedexShell({ initial = 1 }) {
             style={clickableStyle}
           />
 
-          {/* UP (new invisible zone) */}
           <rect
             x="54"
             y="120"
@@ -1746,13 +1701,12 @@ export default function PokedexShell({ initial = 1 }) {
             onClick={(e) => {
               e.stopPropagation();
               setDpadPressed(true);
-              nextForm(); // up -> next form
+              nextForm(); 
               setTimeout(() => setDpadPressed(false), 120);
             }}
             style={clickableStyle}
           />
 
-          {/* DOWN (new invisible zone) */}
           <rect
             x="54"
             y="178"
@@ -1764,14 +1718,13 @@ export default function PokedexShell({ initial = 1 }) {
             onClick={(e) => {
               e.stopPropagation();
               setDpadPressed(true);
-              prevForm(); // down -> previous form
+              prevForm(); 
               setTimeout(() => setDpadPressed(false), 120);
             }}
             style={clickableStyle}
           />
         </g>
 
-        {/* OTHER-FORMS button (under D-pad). show active glow when viewing an other form */}
         <g transform="translate(328,520)">
           {otherAsset ? (
             <image
@@ -1823,7 +1776,7 @@ export default function PokedexShell({ initial = 1 }) {
             style={clickableStyle}
           >
             <circle cx="740" cy="556" r="14" fill="#ffc43b" stroke="#a86a00" strokeWidth="3" />
-                                    <text x={734 + CHEVRON_X_OFFSET} y="560.5" fontSize="12" fill="#6a2a2a" fontFamily="sans-serif">&lt;</text>
+             <text x={736+ CHEVRON_X_OFFSET} y="560.5" fontSize="12" fontWeight="550" fill="#6a2a2a" fontFamily="sans-serif">&lt;</text>
           </g>
 
 
@@ -2413,7 +2366,7 @@ export default function PokedexShell({ initial = 1 }) {
             boxShadow: "0 12px 28px rgba(0,0,0,0.42)",
             fontFamily: "'Gameboy', monospace",
             color: "#fffbe6",
-            fontSize: 11,
+            fontSize: 10,
             zIndex: 5,
             scrollbarWidth: "none",
             msOverflowStyle: "none",
@@ -2425,7 +2378,7 @@ export default function PokedexShell({ initial = 1 }) {
               style={{
                 flex: 1,
                 fontWeight: 700,
-                fontSize: 11,
+                fontSize: 10,
                 textTransform: "uppercase",
                 letterSpacing: 0.5,
                 textAlign: "left",
@@ -2438,11 +2391,17 @@ export default function PokedexShell({ initial = 1 }) {
               onClick={() => setShowOverridePanel(false)}
               {...hoverable}
               style={{
-                fontSize: 10,
+                fontSize: 8,
                 color: "white",
                 cursor: "pointer",
                 fontFamily: "'Gameboy'",
                 textAlign: "center",
+                background: "transparent",
+                border: "none",
+                padding: 0,
+                lineHeight: 1,
+                minWidth: 10,
+                minHeight: 10,
               }}
             >X</button>
           </div>
@@ -2464,9 +2423,10 @@ export default function PokedexShell({ initial = 1 }) {
                 borderRadius: 10,
                 cursor: hasOverrideApi && pokemon?.id ? "pointer" : "not-allowed",
                 fontFamily: "'Gameboy', monospace",
+                fontSize: 10,
               }}
             >
-              {canEdit ? "Exit edit mode" : "Enter edit mode"}
+              {canEdit ? "Exit edit mode" : "Enter Edit mode"}
             </button>
             <button
               type="button"
@@ -2482,6 +2442,7 @@ export default function PokedexShell({ initial = 1 }) {
                 borderRadius: 10,
                 cursor: hasOverrideApi ? "pointer" : "not-allowed",
                 fontFamily: "'Gameboy', monospace",
+                fontSize: 10,
               }}
             >
               Set token
@@ -2499,6 +2460,7 @@ export default function PokedexShell({ initial = 1 }) {
                   border: "2px solid #7a0c0c",
                   borderRadius: 10,
                   fontFamily: "'Gameboy', monospace",
+                  fontSize: 10,
                 }}
               >
                 Clear token
@@ -2573,6 +2535,7 @@ export default function PokedexShell({ initial = 1 }) {
                     padding: "6px 8px",
                     cursor: draftDirty && !overrideBusy ? "pointer" : "not-allowed",
                     fontFamily: "'Gameboy', monospace",
+                    fontSize: 10,
                   }}
                 >
                   Save text
@@ -2592,6 +2555,7 @@ export default function PokedexShell({ initial = 1 }) {
                   padding: "6px 8px",
                   cursor: overrideBusy ? "not-allowed" : "pointer",
                   fontFamily: "'Gameboy', monospace",
+                  fontSize: 10,
                 }}
               >
                 Reset text
@@ -2613,7 +2577,7 @@ export default function PokedexShell({ initial = 1 }) {
                   disabled={overrideBusy}
                   onMouseEnter={hoverable.onMouseEnter}
                   onMouseLeave={hoverable.onMouseLeave}
-                  style={{ fontFamily: "'Gameboy', monospace" }}
+                  style={{ fontFamily: "'Gameboy', monospace", fontSize: 10, background: "transparent", border: "none", padding: 0, color: "#fffbe6", cursor: overrideBusy ? "not-allowed" : "pointer" }}
                 >
                   Upload orb sprite
                 </button>
@@ -2623,7 +2587,7 @@ export default function PokedexShell({ initial = 1 }) {
                   disabled={overrideBusy}
                   onMouseEnter={hoverable.onMouseEnter}
                   onMouseLeave={hoverable.onMouseLeave}
-                  style={{ fontFamily: "'Gameboy', monospace" }}
+                  style={{ fontFamily: "'Gameboy', monospace", fontSize: 10, background: "transparent", border: "none", padding: 0, color: "#fffbe6", cursor: overrideBusy ? "not-allowed" : "pointer" }}
                 >
                   Reset orb sprite
                 </button>
@@ -2633,7 +2597,7 @@ export default function PokedexShell({ initial = 1 }) {
                   disabled={overrideBusy}
                   onMouseEnter={hoverable.onMouseEnter}
                   onMouseLeave={hoverable.onMouseLeave}
-                  style={{ fontFamily: "'Gameboy', monospace" }}
+                  style={{ fontFamily: "'Gameboy', monospace", fontSize: 10, background: "transparent", border: "none", padding: 0, color: "#fffbe6", cursor: overrideBusy ? "not-allowed" : "pointer" }}
                 >
                   Upload shiny sprite
                 </button>
@@ -2643,7 +2607,7 @@ export default function PokedexShell({ initial = 1 }) {
                   disabled={overrideBusy}
                   onMouseEnter={hoverable.onMouseEnter}
                   onMouseLeave={hoverable.onMouseLeave}
-                  style={{ fontFamily: "'Gameboy', monospace" }}
+                  style={{ fontFamily: "'Gameboy', monospace", fontSize: 10, background: "transparent", border: "none", padding: 0, color: "#fffbe6", cursor: overrideBusy ? "not-allowed" : "pointer" }}
                 >
                   Reset shiny sprite
                 </button>
@@ -2653,7 +2617,7 @@ export default function PokedexShell({ initial = 1 }) {
                   disabled={overrideBusy}
                   onMouseEnter={hoverable.onMouseEnter}
                   onMouseLeave={hoverable.onMouseLeave}
-                  style={{ fontFamily: "'Gameboy', monospace" }}
+                  style={{ fontFamily: "'Gameboy', monospace", fontSize: 10, background: "transparent", border: "none", padding: 0, color: "#fffbe6", cursor: overrideBusy ? "not-allowed" : "pointer" }}
                 >
                   Upload artwork
                 </button>
@@ -2663,7 +2627,7 @@ export default function PokedexShell({ initial = 1 }) {
                   disabled={overrideBusy}
                   onMouseEnter={hoverable.onMouseEnter}
                   onMouseLeave={hoverable.onMouseLeave}
-                  style={{ fontFamily: "'Gameboy', monospace" }}
+                  style={{ fontFamily: "'Gameboy', monospace", fontSize: 10, background: "transparent", border: "none", padding: 0, color: "#fffbe6", cursor: overrideBusy ? "not-allowed" : "pointer" }}
                 >
                   Reset artwork
                 </button>
@@ -2673,7 +2637,7 @@ export default function PokedexShell({ initial = 1 }) {
                   disabled={overrideBusy}
                   onMouseEnter={hoverable.onMouseEnter}
                   onMouseLeave={hoverable.onMouseLeave}
-                  style={{ fontFamily: "'Gameboy', monospace" }}
+                  style={{ fontFamily: "'Gameboy', monospace", fontSize: 10, background: "transparent", border: "none", padding: 0, color: "#fffbe6", cursor: overrideBusy ? "not-allowed" : "pointer" }}
                 >
                   Upload shiny art
                 </button>
@@ -2683,7 +2647,7 @@ export default function PokedexShell({ initial = 1 }) {
                   disabled={overrideBusy}
                   onMouseEnter={hoverable.onMouseEnter}
                   onMouseLeave={hoverable.onMouseLeave}
-                  style={{ fontFamily: "'Gameboy', monospace" }}
+                  style={{ fontFamily: "'Gameboy', monospace", fontSize: 10, background: "transparent", border: "none", padding: 0, color: "#fffbe6", cursor: overrideBusy ? "not-allowed" : "pointer" }}
                 >
                   Reset shiny art
                 </button>
@@ -2752,6 +2716,7 @@ export default function PokedexShell({ initial = 1 }) {
                     background: "#fff7d1",
                     color: "#2a0a0a",
                     fontFamily: "'Gameboy', monospace",
+                    fontSize: 10,
                   }}
                 />
                 <input
@@ -2766,6 +2731,7 @@ export default function PokedexShell({ initial = 1 }) {
                     background: "#fff7d1",
                     color: "#2a0a0a",
                     fontFamily: "'Gameboy', monospace",
+                    fontSize: 10,
                   }}
                 />
                 <button
@@ -2783,6 +2749,7 @@ export default function PokedexShell({ initial = 1 }) {
                     borderRadius: 8,
                     cursor: heldItemBusy ? "not-allowed" : "pointer",
                     fontFamily: "'Gameboy', monospace",
+                    fontSize: 10,
                   }}
                 >
                   Upload icon
@@ -2798,6 +2765,7 @@ export default function PokedexShell({ initial = 1 }) {
                     background: "#fff7d1",
                     color: "#2a0a0a",
                     fontFamily: "'Gameboy', monospace",
+                    fontSize: 10,
                     minHeight: 60,
                     resize: "vertical",
                   }}
@@ -2816,6 +2784,7 @@ export default function PokedexShell({ initial = 1 }) {
                     borderRadius: 10,
                     cursor: heldItemBusy ? "not-allowed" : "pointer",
                     fontFamily: "'Gameboy', monospace",
+                    fontSize: 10,
                   }}
                 >
                   Save held item
@@ -2838,6 +2807,8 @@ export default function PokedexShell({ initial = 1 }) {
                   borderRadius: 12,
                   cursor: overrideBusy || heldItemBusy ? "not-allowed" : "pointer",
                   fontFamily: "'Gameboy', monospace",
+                  fontSize: 9,
+                  fontWeight: 700,
                 }}
               >
                 Delete override entry

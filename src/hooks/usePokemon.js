@@ -24,7 +24,15 @@ const simpleCache = {
   item: new Map(),
 };
 
-const overrideApiBase = (import.meta.env.VITE_OVERRIDE_API_URL || "").replace(/\/$/, "");
+const overrideApiBase = (() => {
+  if (typeof process !== "undefined" && process.env?.NEXT_PUBLIC_OVERRIDE_API_URL) {
+    return process.env.NEXT_PUBLIC_OVERRIDE_API_URL.trim().replace(/\/$/, "");
+  }
+  if (typeof import.meta !== "undefined" && import.meta.env?.VITE_OVERRIDE_API_URL) {
+    return (import.meta.env.VITE_OVERRIDE_API_URL || "").replace(/\/$/, "");
+  }
+  return "";
+})();
 
 async function fetchOverrideEntry(identifier, signal) {
   if (!overrideApiBase) return null;
@@ -405,7 +413,8 @@ export default function usePokemon(idOrName) {
                   let overrideSprite = null;
                   try {
                     const ov = await fetchOverrideEntry(p2.id ?? sname, controller.signal);
-                    overrideSprite = ov?.artNormal || ov?.spriteNormal || null;
+                    // Only prefer override artwork; do not fall back to override sprites for evo tiles.
+                    overrideSprite = ov?.artNormal ? ov.artNormal : null;
                   } catch (err) {
                     void err;
                   }

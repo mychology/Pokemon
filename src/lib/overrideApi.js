@@ -1,12 +1,19 @@
-const baseUrl = (import.meta.env.VITE_OVERRIDE_API_URL || "").replace(/\/$/, "");
+const envUrl = (() => {
+  if (typeof process !== "undefined" && process.env?.NEXT_PUBLIC_OVERRIDE_API_URL) {
+    return process.env.NEXT_PUBLIC_OVERRIDE_API_URL;
+  }
+  if (typeof import.meta !== "undefined" && import.meta.env?.VITE_OVERRIDE_API_URL) {
+    return import.meta.env.VITE_OVERRIDE_API_URL;
+  }
+  return "";
+})();
+const baseUrl = envUrl ? envUrl.replace(/\/$/, "") : "";
 
 export const overrideApiBase = baseUrl;
-export const hasOverrideApi = Boolean(baseUrl);
+export const hasOverrideApi = true;
 
 function ensureBaseUrl() {
-  if (!baseUrl) {
-    throw new Error("Override API URL (VITE_OVERRIDE_API_URL) is not configured.");
-  }
+  return baseUrl || "";
 }
 
 function buildIdentifierValue(identifier) {
@@ -15,11 +22,10 @@ function buildIdentifierValue(identifier) {
 }
 
 export async function fetchOverrideRecord(identifier, signal) {
-  if (!baseUrl) return null;
   const normalized = buildIdentifierValue(identifier).trim();
   if (!normalized) return null;
   try {
-    const res = await fetch(`${baseUrl}/api/overrides/${encodeURIComponent(normalized)}`, { signal });
+    const res = await fetch(`${baseUrl || ""}/api/overrides/${encodeURIComponent(normalized)}`, { signal });
     if (res.status === 404) return null;
     if (!res.ok) return null;
     const data = await res.json();

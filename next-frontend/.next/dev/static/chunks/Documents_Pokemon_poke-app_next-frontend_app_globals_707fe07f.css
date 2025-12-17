@@ -1,0 +1,121 @@
+/* [project]/Documents/Pokemon/poke-app/next-frontend/app/globals.css [app-client] (css) */
+@font-face {
+  font-family: Gameboy;
+  src: url("/assets/gameboy.ttf") format("truetype");
+  font-weight: normal;
+  font-style: normal;
+  font-display: swap;
+}
+
+:root {
+  --accent: #d43b2b;
+  --panel: #e6e6e6;
+  --panel-2: #d7d7d7;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html, body {
+  background: url("/bruh.jpg") center / cover no-repeat fixed;
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+}
+
+body {
+  font-family: Gameboy, "Press Start 2P", monospace;
+}
+
+.pokedex-page {
+  justify-content: center;
+  align-items: flex-start;
+  min-height: 100vh;
+  padding: 0;
+  display: flex;
+}
+
+.gameboy-font {
+  font-family: Gameboy, "Press Start 2P", monospace;
+}
+
+.panel-inner {
+  background: linear-gradient(#efefef, #e0e0e0);
+}
+
+@keyframes blink-odd {
+  0% {
+    opacity: 1;
+  }
+
+  50% {
+    opacity: .15;
+  }
+
+  100% {
+    opacity: 1;
+  }
+}
+
+@keyframes blink-even {
+  0% {
+    opacity: .15;
+  }
+
+  50% {
+    opacity: 1;
+  }
+
+  100% {
+    opacity: .15;
+  }
+}
+
+.animate-blink-odd {
+  animation: 1s ease-in-out infinite blink-odd;
+}
+
+.animate-blink-even {
+  animation: 1s ease-in-out infinite blink-even;
+}
+
+@keyframes grille-move {
+  0% {
+    opacity: .8;
+    transform: translateY(0);
+  }
+
+  50% {
+    opacity: 1;
+    transform: translateY(-1px);
+  }
+
+  100% {
+    opacity: .8;
+    transform: translateY(0);
+  }
+}
+
+.speaker-playing > div {
+  animation: .35s ease-in-out infinite grille-move;
+}
+
+img.pixelated {
+  image-rendering: pixelated;
+}
+
+.tooltip {
+  pointer-events: none;
+  color: #fff;
+  white-space: nowrap;
+  background: #000000e6;
+  border-radius: 4px;
+  padding: 6px 8px;
+  font-size: 11px;
+  position: absolute;
+  transform: translateX(-50%);
+}
+
+/*# sourceMappingURL=Documents_Pokemon_poke-app_next-frontend_app_globals_707fe07f.css.map*/

@@ -1,0 +1,81 @@
+@font-face {
+  font-family: "Gameboy";
+  src: url("/assets/gameboy.ttf") format("truetype");
+  font-weight: normal;
+  font-style: normal;
+  font-display: swap;
+}
+
+:root {
+  --accent: #d43b2b;
+  --panel: #e6e6e6;
+  --panel-2: #d7d7d7;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  background: url("/bruh.jpg") no-repeat center center fixed;
+  background-size: cover;
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+}
+
+body {
+  font-family: "Gameboy", "Press Start 2P", monospace;
+}
+
+.pokedex-page {
+  min-height: 100vh;
+  display: flex;
+  justify-content: center;
+  align-items: flex-start;
+  padding: 0px;
+}
+
+.gameboy-font {
+  font-family: "Gameboy", "Press Start 2P", monospace;
+}
+
+.panel-inner {
+  background: linear-gradient(180deg, #efefef, #e0e0e0);
+}
+
+@keyframes blink-odd {
+  0% { opacity: 1; }
+  50% { opacity: 0.15; }
+  100% { opacity: 1; }
+}
+@keyframes blink-even {
+  0% { opacity: 0.15; }
+  50% { opacity: 1; }
+  100% { opacity: 0.15; }
+}
+.animate-blink-odd { animation: blink-odd 1s infinite ease-in-out; }
+.animate-blink-even { animation: blink-even 1s infinite ease-in-out; }
+
+@keyframes grille-move {
+  0% { transform: translateY(0); opacity: 0.8; }
+  50% { transform: translateY(-1px); opacity: 1; }
+  100% { transform: translateY(0); opacity: 0.8; }
+}
+.speaker-playing > div { animation: grille-move 0.35s infinite ease-in-out; }
+
+img.pixelated { image-rendering: pixelated; }
+
+.tooltip {
+  pointer-events: none;
+  position: absolute;
+  transform: translateX(-50%);
+  background: rgba(0, 0, 0, 0.9);
+  color: white;
+  font-size: 11px;
+  padding: 6px 8px;
+  border-radius: 4px;
+  white-space: nowrap;
+}
